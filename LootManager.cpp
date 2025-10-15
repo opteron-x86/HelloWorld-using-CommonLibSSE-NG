@@ -28,19 +28,10 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
 }
 
 void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
-    // Process in separate thread with proper lifetime management
-    auto actorHandle = a_actor->GetHandle();
-    
-    std::thread([this, actorHandle]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        
-        auto* actor = actorHandle.get().get();
-        
-        if (actor) {
-            std::lock_guard<std::mutex> lock(processingMutex);
-            FilterInventory(actor);
-        }
-    }).detach();
+    if (a_actor) {
+        std::lock_guard<std::mutex> lock(processingMutex);
+        FilterInventory(a_actor);
+    }
 }
 
 bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
@@ -66,9 +57,6 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
     if (!a_actor) return;
     
     auto inventory = a_actor->GetInventory();
-    auto* actorBase = a_actor->GetActorBase();
-    
-    if (!actorBase) return;
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
@@ -81,17 +69,14 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
             continue;
         }
         
-        // Iterate through each instance's extra data
         for (auto* extraList : *entry->extraLists) {
             if (!extraList) continue;
             
             if (!ShouldDropItem(item, a_actor)) {
-                // Add ownership if not already owned
-                auto* ownership = extraList->GetByType<RE::ExtraOwnership>();
-                if (!ownership) {
-                    ownership = new RE::ExtraOwnership();
-                    ownership->owner = actorBase;
-                    extraList->Add(ownership);
+                auto* cannotWear = extraList->GetByType<RE::ExtraCannotWear>();
+                if (!cannotWear) {
+                    cannotWear = new RE::ExtraCannotWear();
+                    extraList->Add(cannotWear);
                 }
             }
         }
