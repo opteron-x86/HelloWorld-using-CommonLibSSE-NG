@@ -27,7 +27,7 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
-void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
+void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* /*a_killer*/) {
     auto actorHandle = a_actor->GetHandle();
     
     std::thread([this, actorHandle]() {
@@ -38,16 +38,9 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
         
         std::lock_guard<std::mutex> lock(processingMutex);
         
-        // Roll for which items to drop
         auto droppedItems = RollForLoot(actor);
-        
-        // Drop items physically near corpse
         DropLootPhysically(actor, droppedItems);
-        
-        // Clean up remaining inventory
         CleanInventory(actor, droppedItems);
-        
-        // Block normal container access
         actor->SetActivationBlocked(true);
         
     }).detach();
@@ -108,23 +101,20 @@ std::vector<LootManager::DroppedItem> LootManager::RollForLoot(RE::Actor* a_acto
 void LootManager::DropLootPhysically(RE::Actor* a_actor, const std::vector<DroppedItem>& items) {
     if (items.empty()) return;
     
-    auto* settings = Settings::GetSingleton();
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<float> angleDist(0.0f, 360.0f);
     std::uniform_real_distribution<float> radiusDist(50.0f, 120.0f);
     
     for (const auto& [item, count] : items) {
-        // Calculate drop position in a radius around corpse
         float angle = angleDist(gen) * (3.14159f / 180.0f);
         float radius = radiusDist(gen);
         
         float offsetX = radius * std::cos(angle);
         float offsetY = radius * std::sin(angle);
         
-        auto* dropped = a_actor->DropObject(item, nullptr, count);
-        if (dropped) {
-            // Position relative to corpse
+        auto droppedHandle = a_actor->DropObject(item, nullptr, count);
+        if (auto dropped = droppedHandle.get(); dropped) {
             auto corpsePos = a_actor->GetPosition();
             dropped->MoveTo(a_actor, offsetX, offsetY, corpsePos.z + 50.0f);
         }
