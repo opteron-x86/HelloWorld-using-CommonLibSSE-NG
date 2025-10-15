@@ -31,7 +31,7 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     const RE::TESContainerChangedEvent* a_event,
     RE::BSTEventSource<RE::TESContainerChangedEvent>*) {
     
-    if (!a_event || a_event->newContainer != 0x14) {
+    if (!a_event) {
         return RE::BSEventNotifyControl::kContinue;
     }
     
