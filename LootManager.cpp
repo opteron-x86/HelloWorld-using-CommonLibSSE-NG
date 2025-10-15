@@ -27,11 +27,11 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
-void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
+void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor*) {
     auto actorHandle = a_actor->GetHandle();
     
     std::thread([this, actorHandle]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         
         auto* actor = actorHandle.get().get();
         
@@ -59,34 +59,23 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
     return true;
 }
 
-RE::TESObjectREFR* LootManager::GetOrCreateContainerBase() {
-    if (!containerBase) {
-        auto* dataHandler = RE::TESDataHandler::GetSingleton();
-        if (!dataHandler) return nullptr;
-        
-        // Find or create a generic container base object
-        // Using a sack as it's small and unobtrusive
-        containerBase = dataHandler->LookupForm<RE::TESObjectCONT>(0x000B876F, "Skyrim.esm"); // Sack01
-        
-        if (!containerBase) {
-            // Fallback to any container
-            auto& containers = dataHandler->GetFormArray<RE::TESObjectCONT>();
-            if (!containers.empty()) {
-                containerBase = containers[0];
-            }
-        }
-    }
-    
-    return containerBase;
-}
-
 void LootManager::CreateLootContainer(RE::Actor* a_actor) {
     if (!a_actor) return;
     
-    auto* containerBase = GetOrCreateContainerBase();
-    if (!containerBase) {
-        logger::error("Failed to find container base form");
-        return;
+    auto* dataHandler = RE::TESDataHandler::GetSingleton();
+    if (!dataHandler) return;
+    
+    // Get a sack container base form
+    auto* containerForm = dataHandler->LookupForm<RE::TESObjectCONT>(0x000B876F, "Skyrim.esm");
+    if (!containerForm) {
+        // Fallback: try to find any container
+        auto& containers = dataHandler->GetFormArray<RE::TESObjectCONT>();
+        if (!containers.empty()) {
+            containerForm = containers[0];
+        }
+        if (!containerForm) {
+            return;
+        }
     }
     
     auto inventory = a_actor->GetInventory();
@@ -104,26 +93,25 @@ void LootManager::CreateLootContainer(RE::Actor* a_actor) {
             continue;
         }
         
-        // Check if item is equipped
+        // Check if item is equipped (worn or wielded)
         bool isEquipped = false;
         if (entry && entry->extraLists) {
             for (auto* extraList : *entry->extraLists) {
-                if (extraList && extraList->HasType(RE::ExtraDataType::kWorn) || 
-                    extraList->HasType(RE::ExtraDataType::kWornLeft)) {
+                if (extraList && (extraList->HasType(RE::ExtraDataType::kWorn) || 
+                    extraList->HasType(RE::ExtraDataType::kWornLeft))) {
                     isEquipped = true;
                     break;
                 }
             }
         }
         
-        // For equipped items, always check drop chance
-        // For unequipped items, check drop chance per item in stack
+        // Roll for drop
         if (isEquipped) {
             if (ShouldDropItem(item, a_actor)) {
                 lootableItems.push_back({item, count});
             }
         } else {
-            // For stackable items, roll for each one
+            // For stackable unequipped items, roll for each
             std::int32_t dropCount = 0;
             
             if (count > 1) {
@@ -144,47 +132,42 @@ void LootManager::CreateLootContainer(RE::Actor* a_actor) {
         }
     }
     
-    // Only create container if there are lootable items
+    // If no lootable items, actor remains searchable but empty
     if (lootableItems.empty()) {
-        // Disable looting on the corpse
-        a_actor->SetActivate(false);
         return;
     }
     
-    // Create container at actor's position
-    auto* cell = a_actor->GetParentCell();
-    if (!cell) return;
-    
-    auto position = a_actor->GetPosition();
-    auto angle = a_actor->GetAngle();
-    
-    auto* container = cell->PlaceObjectAtMe(containerBase, false);
+    // Use PlaceObjectAtMe to spawn container
+    auto* container = a_actor->PlaceObjectAtMe(containerForm, false);
     if (!container) {
-        logger::error("Failed to create loot container");
         return;
     }
     
-    // Position container at corpse
-    container->SetPosition(position);
-    container->SetAngle(angle);
+    // Position container at actor's exact location
+    container->MoveTo(a_actor);
     
-    // Make container invisible and enable it
-    container->SetDisplayName(a_actor->GetDisplayFullName(), true);
+    // Make the container take the actor's name for clarity
+    auto actorName = a_actor->GetDisplayFullName();
+    if (actorName && strlen(actorName) > 0) {
+        container->SetDisplayName(actorName, true);
+    }
     
     // Transfer lootable items to container
     for (const auto& [item, count] : lootableItems) {
-        // Remove from corpse without dropping
+        // Remove from corpse
         a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
         
         // Add to container
         container->AddObjectToContainer(item, nullptr, count, nullptr);
     }
     
-    // Disable looting on the corpse to force interaction with container
-    a_actor->SetActivate(false);
-    
-    // Make sure container is enabled and can be activated
-    container->Enable(false);
+    // Disable corpse looting by removing its activation
+    // We do this by setting the actor as "no activate"
+    using func_t = decltype(&RE::TESObjectREFR::SetActivationBlocked);
+    REL::Relocation<func_t> SetActivationBlocked{RELOCATION_ID(19371, 19797)};
+    if (SetActivationBlocked) {
+        SetActivationBlocked(a_actor, true);
+    }
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
@@ -194,7 +177,7 @@ bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor)
         return true;
     }
     
-    // Quest items always drop to prevent quest breakage
+    // Quest items and keys always drop to prevent breakage
     if (a_item->GetFormType() == RE::FormType::Misc) {
         if (auto* miscItem = a_item->As<RE::TESObjectMISC>()) {
             if (miscItem && miscItem->GetFullName() && 

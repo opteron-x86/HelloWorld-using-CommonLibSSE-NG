@@ -27,9 +27,7 @@ private:
     void CreateLootContainer(RE::Actor* a_actor);
     bool ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor);
     float GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor);
-    RE::TESObjectREFR* GetOrCreateContainerBase();
     
     std::atomic<bool> enabled{true};
     std::mutex processingMutex;
-    RE::TESObjectCONT* containerBase{nullptr};
 };
