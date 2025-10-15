@@ -57,7 +57,7 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
-void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
+void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* /*a_killer*/) {
     auto actorHandle = a_actor->GetHandle();
     
     std::thread([this, actorHandle]() {
@@ -231,16 +231,21 @@ void LootManager::HandleCorpseActivation(RE::Actor* a_corpse, RE::TESObjectREFR*
         it->second.looted = true;
     }
     
-    // Open container for player
+    // Open container for player by activating it
     if (a_activator && a_activator->As<RE::Actor>()) {
         auto* player = a_activator->As<RE::Actor>();
         if (player && player->IsPlayerRef()) {
-            RE::ActorEquipManager::GetSingleton()->OpenContainer(container);
+            // Activate the container to open it
+            container->Activate(player, nullptr, 1, nullptr, 0);
             
-            // Schedule cleanup
-            std::thread([this, container]() {
-                std::this_thread::sleep_for(std::chrono::seconds(2));
-                CleanupContainer(container);
+            // Schedule cleanup after player closes menu
+            auto containerHandle = container->GetHandle();
+            std::thread([this, containerHandle]() {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                auto containerRef = containerHandle.get();
+                if (containerRef) {
+                    CleanupContainer(containerRef.get());
+                }
             }).detach();
         }
     }
@@ -248,12 +253,6 @@ void LootManager::HandleCorpseActivation(RE::Actor* a_corpse, RE::TESObjectREFR*
 
 RE::TESObjectREFR* LootManager::CreateTempContainer(RE::Actor* a_corpse) {
     // Use a standard chest container
-    auto* factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::TESObjectCONT>();
-    if (!factory) {
-        return nullptr;
-    }
-    
-    // Get a basic chest container from game data
     auto* dataHandler = RE::TESDataHandler::GetSingleton();
     if (!dataHandler) {
         return nullptr;
@@ -265,17 +264,25 @@ RE::TESObjectREFR* LootManager::CreateTempContainer(RE::Actor* a_corpse) {
         return nullptr;
     }
     
-    // Place container near corpse (invisible)
-    auto* container = a_corpse->PlaceObjectAtMe(chestForm, false);
+    // Place container near corpse
+    auto containerPtr = a_corpse->PlaceObjectAtMe(chestForm, false);
+    if (!containerPtr) {
+        return nullptr;
+    }
+    
+    auto* container = containerPtr.get();
     if (container) {
         container->SetPosition(a_corpse->GetPosition());
         container->data.angle = a_corpse->data.angle;
         
-        // Make it invisible and disable collision
-        container->Get3D()->SetVisible(false);
+        // Make it invisible
+        auto* node = container->Get3D();
+        if (node) {
+            node->SetVisible(false);
+        }
     }
     
-    return container.get();
+    return container;
 }
 
 void LootManager::TransferLootToContainer(RE::Actor* a_corpse, RE::TESObjectREFR* a_container, const RolledLoot& a_loot) {
