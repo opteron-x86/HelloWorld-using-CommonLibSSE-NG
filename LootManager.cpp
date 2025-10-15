@@ -18,26 +18,38 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     }
     
     auto* actor = a_event->actorDying->As<RE::Actor>();
+    auto* killer = a_event->actorKiller ? a_event->actorKiller->As<RE::Actor>() : nullptr;
     
     if (actor && ShouldProcessActor(actor)) {
-        ProcessActorDeath(actor, nullptr);
+        ProcessActorDeath(actor, killer);
     }
     
     return RE::BSEventNotifyControl::kContinue;
 }
 
-void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor*) {
+void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
     auto actorHandle = a_actor->GetHandle();
     
     std::thread([this, actorHandle]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         
         auto* actor = actorHandle.get().get();
+        if (!actor) return;
         
-        if (actor) {
-            std::lock_guard<std::mutex> lock(processingMutex);
-            FilterInventory(actor);
-        }
+        std::lock_guard<std::mutex> lock(processingMutex);
+        
+        // Roll for which items to drop
+        auto droppedItems = RollForLoot(actor);
+        
+        // Drop items physically near corpse
+        DropLootPhysically(actor, droppedItems);
+        
+        // Clean up remaining inventory
+        CleanInventory(actor, droppedItems);
+        
+        // Block normal container access
+        actor->SetActivationBlocked(true);
+        
     }).detach();
 }
 
@@ -58,92 +70,127 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
     return true;
 }
 
-bool LootManager::IsBodyArmor(RE::TESBoundObject* a_item) {
-    if (!a_item || !a_item->Is(RE::FormType::Armor)) {
-        return false;
-    }
-    
-    auto* armor = a_item->As<RE::TESObjectARMO>();
-    if (!armor) {
-        return false;
-    }
-    
-    using BipedSlot = RE::BGSBipedObjectForm::BipedObjectSlot;
-    auto slotMask = armor->GetSlotMask();
-    
-    return (std::to_underlying(slotMask) & std::to_underlying(BipedSlot::kBody)) != 0;
-}
-
-void LootManager::AddReplacementClothing(RE::Actor* a_actor) {
-    auto* dataHandler = RE::TESDataHandler::GetSingleton();
-    if (!dataHandler) return;
-    
-    // "Belted Tunic" FormID 0x000A6D7D
-    auto* clothing = dataHandler->LookupForm<RE::TESObjectARMO>(0x000A6D7D, "Skyrim.esm");
-    if (clothing) {
-        a_actor->AddObjectToContainer(clothing, nullptr, 1, nullptr);
-        
-        // Equip the clothing
-        auto* equipManager = RE::ActorEquipManager::GetSingleton();
-        if (equipManager) {
-            equipManager->EquipObject(a_actor, clothing);
-        }
-    }
-}
-
-void LootManager::FilterInventory(RE::Actor* a_actor) {
-    if (!a_actor) return;
+std::vector<LootManager::DroppedItem> LootManager::RollForLoot(RE::Actor* a_actor) {
+    std::vector<DroppedItem> result;
     
     auto inventory = a_actor->GetInventory();
-    
-    std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToRemove;
-    bool removedBodyArmor = false;
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
         if (!item || count <= 0) continue;
         
-        if (item->IsGold()) {
+        // Skip gold - handle separately
+        if (item->IsGold()) continue;
+        
+        // Essential items always drop
+        if (IsEssentialItem(item)) {
+            result.push_back({item, count});
             continue;
         }
         
-        std::int32_t removeCount = 0;
-        
+        // Roll for each item
+        std::int32_t dropCount = 0;
         for (std::int32_t i = 0; i < count; ++i) {
-            if (!ShouldDropItem(item, a_actor)) {
-                removeCount++;
+            if (ShouldDropItem(item, a_actor)) {
+                dropCount++;
             }
         }
         
-        if (removeCount > 0) {
-            if (IsBodyArmor(item)) {
-                removedBodyArmor = true;
-            }
-            
-            itemsToRemove.push_back({item, removeCount});
+        if (dropCount > 0) {
+            result.push_back({item, dropCount});
         }
     }
     
-    for (const auto& [item, count] : itemsToRemove) {
-        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
-    }
+    return result;
+}
+
+void LootManager::DropLootPhysically(RE::Actor* a_actor, const std::vector<DroppedItem>& items) {
+    if (items.empty()) return;
     
-    if (removedBodyArmor) {
-        AddReplacementClothing(a_actor);
+    auto* settings = Settings::GetSingleton();
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> angleDist(0.0f, 360.0f);
+    std::uniform_real_distribution<float> radiusDist(50.0f, 120.0f);
+    
+    for (const auto& [item, count] : items) {
+        // Calculate drop position in a radius around corpse
+        float angle = angleDist(gen) * (3.14159f / 180.0f);
+        float radius = radiusDist(gen);
+        
+        float offsetX = radius * std::cos(angle);
+        float offsetY = radius * std::sin(angle);
+        
+        auto* dropped = a_actor->DropObject(item, nullptr, count);
+        if (dropped) {
+            // Position relative to corpse
+            auto corpsePos = a_actor->GetPosition();
+            dropped->MoveTo(a_actor, offsetX, offsetY, corpsePos.z + 50.0f);
+        }
     }
 }
 
+void LootManager::CleanInventory(RE::Actor* a_actor, const std::vector<DroppedItem>& droppedItems) {
+    auto inventory = a_actor->GetInventory();
+    
+    for (const auto& [item, data] : inventory) {
+        auto& [count, entry] = data;
+        
+        if (!item || count <= 0) continue;
+        
+        // Keep gold in corpse inventory
+        if (item->IsGold()) continue;
+        
+        // Check if this item was dropped
+        bool wasDropped = false;
+        std::int32_t droppedCount = 0;
+        
+        for (const auto& dropped : droppedItems) {
+            if (dropped.item == item) {
+                wasDropped = true;
+                droppedCount = dropped.count;
+                break;
+            }
+        }
+        
+        // Remove items that weren't dropped
+        if (wasDropped) {
+            // Remove the count that was dropped, keep the rest
+            std::int32_t remaining = count - droppedCount;
+            if (remaining > 0) {
+                a_actor->RemoveItem(item, remaining, RE::ITEM_REMOVE_REASON::kRemove, 
+                    nullptr, nullptr);
+            }
+        } else {
+            // Remove all of this item
+            a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, 
+                nullptr, nullptr);
+        }
+    }
+}
+
+bool LootManager::IsEssentialItem(RE::TESBoundObject* a_item) {
+    if (!a_item) return false;
+    
+    // Quest items
+    if (a_item->GetFormType() == RE::FormType::KeyMaster) {
+        return true;
+    }
+    
+    // Check for quest item flag in misc items
+    if (auto* misc = a_item->As<RE::TESObjectMISC>()) {
+        auto* fullName = misc->GetFullName();
+        if (fullName && std::string_view(fullName).find("Key") != std::string_view::npos) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
-    if (!a_item) return true;
-    
-    if (a_item->IsGold()) {
-        return true;
-    }
-    
-    if (a_item->GetFormFlags() & RE::TESForm::RecordFlags::kMustUpdate) {
-        return true;
-    }
+    if (!a_item) return false;
     
     float dropChance = GetDropChance(a_item, a_actor);
     
@@ -163,32 +210,25 @@ float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor)
     case RE::FormType::Armor:
         baseChance = settings->armorDropChance;
         break;
-        
     case RE::FormType::Weapon:
         baseChance = settings->weaponDropChance;
         break;
-        
     case RE::FormType::Ammo:
         baseChance = settings->ammoDropChance;
         break;
-        
     case RE::FormType::AlchemyItem:
         baseChance = settings->potionDropChance;
         break;
-        
     case RE::FormType::Ingredient:
         baseChance = settings->ingredientDropChance;
         break;
-        
     case RE::FormType::Book:
     case RE::FormType::Scroll:
         baseChance = settings->bookDropChance;
         break;
-        
     case RE::FormType::Misc:
         baseChance = settings->miscDropChance;
         break;
-        
     case RE::FormType::SoulGem:
         baseChance = settings->soulgemDropChance;
         break;
