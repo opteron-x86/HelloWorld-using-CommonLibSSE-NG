@@ -1,17 +1,11 @@
 #include "LootManager.h"
 #include "Settings.h"
 #include <random>
-#include <unordered_set>
 
 void LootManager::Register() {
-    auto* scriptEventSource = RE::ScriptEventSourceHolder::GetSingleton();
-    if (scriptEventSource) {
-        scriptEventSource->AddEventSink(this);
-    }
-    
-    // Register for container changed events to prevent looting blocked items
-    if (auto* ui = RE::UI::GetSingleton()) {
-        ui->GetEventSource<RE::TESContainerChangedEvent>()->AddEventSink(this);
+    auto* eventSource = RE::ScriptEventSourceHolder::GetSingleton();
+    if (eventSource) {
+        eventSource->AddEventSink(this);
     }
 }
 
@@ -33,48 +27,6 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
-RE::BSEventNotifyControl LootManager::ProcessEvent(
-    const RE::TESContainerChangedEvent* a_event,
-    RE::BSTEventSource<RE::TESContainerChangedEvent>*) {
-    
-    if (!a_event) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    // Check if player is taking an item from a corpse
-    auto* player = RE::PlayerCharacter::GetSingleton();
-    if (!player || a_event->newContainer != player->GetFormID()) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    // Get the source actor
-    auto* sourceForm = RE::TESForm::LookupByID(a_event->oldContainer);
-    auto* sourceActor = sourceForm ? sourceForm->As<RE::Actor>() : nullptr;
-    
-    if (!sourceActor || !sourceActor->IsDead()) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    // Check if this item is blocked
-    auto* item = RE::TESForm::LookupByID<RE::TESBoundObject>(a_event->baseObj);
-    if (item && IsItemBlocked(sourceActor, item)) {
-        // Return item to corpse
-        SKSE::GetTaskInterface()->AddTask([sourceActor, item, count = a_event->itemCount]() {
-            if (sourceActor && item) {
-                auto* player = RE::PlayerCharacter::GetSingleton();
-                if (player) {
-                    player->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, sourceActor);
-                }
-            }
-        });
-        
-        // Show message to player
-        RE::DebugNotification("This item cannot be looted.");
-    }
-    
-    return RE::BSEventNotifyControl::kContinue;
-}
-
 void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
     auto actorHandle = a_actor->GetHandle();
     
@@ -85,7 +37,7 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
         
         if (actor) {
             std::lock_guard<std::mutex> lock(processingMutex);
-            FilterInventory(actor);
+            CreateLootContainer(actor);
         }
     }).detach();
 }
@@ -107,76 +59,132 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
     return true;
 }
 
-void LootManager::FilterInventory(RE::Actor* a_actor) {
+RE::TESObjectREFR* LootManager::GetOrCreateContainerBase() {
+    if (!containerBase) {
+        auto* dataHandler = RE::TESDataHandler::GetSingleton();
+        if (!dataHandler) return nullptr;
+        
+        // Find or create a generic container base object
+        // Using a sack as it's small and unobtrusive
+        containerBase = dataHandler->LookupForm<RE::TESObjectCONT>(0x000B876F, "Skyrim.esm"); // Sack01
+        
+        if (!containerBase) {
+            // Fallback to any container
+            auto& containers = dataHandler->GetFormArray<RE::TESObjectCONT>();
+            if (!containers.empty()) {
+                containerBase = containers[0];
+            }
+        }
+    }
+    
+    return containerBase;
+}
+
+void LootManager::CreateLootContainer(RE::Actor* a_actor) {
     if (!a_actor) return;
     
-    auto inventory = a_actor->GetInventory();
-    std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToRemove;
+    auto* containerBase = GetOrCreateContainerBase();
+    if (!containerBase) {
+        logger::error("Failed to find container base form");
+        return;
+    }
     
+    auto inventory = a_actor->GetInventory();
+    std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> lootableItems;
+    
+    // Determine which items should be lootable
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
         if (!item || count <= 0) continue;
         
-        bool isEquipped = IsItemEquipped(a_actor, item);
-        bool shouldDrop = ShouldDropItem(item, a_actor);
-        
-        // Always allow gold
+        // Gold always drops
         if (item->IsGold()) {
+            lootableItems.push_back({item, count});
             continue;
         }
         
-        // Handle equipped items differently from unequipped
-        if (isEquipped && !shouldDrop) {
-            // Keep equipped but block from looting
-            BlockItem(a_actor, item);
-        } else if (!isEquipped) {
-            // For unequipped items, determine how many to remove
-            std::int32_t removeCount = 0;
+        // Check if item is equipped
+        bool isEquipped = false;
+        if (entry && entry->extraLists) {
+            for (auto* extraList : *entry->extraLists) {
+                if (extraList && extraList->HasType(RE::ExtraDataType::kWorn) || 
+                    extraList->HasType(RE::ExtraDataType::kWornLeft)) {
+                    isEquipped = true;
+                    break;
+                }
+            }
+        }
+        
+        // For equipped items, always check drop chance
+        // For unequipped items, check drop chance per item in stack
+        if (isEquipped) {
+            if (ShouldDropItem(item, a_actor)) {
+                lootableItems.push_back({item, count});
+            }
+        } else {
+            // For stackable items, roll for each one
+            std::int32_t dropCount = 0;
             
             if (count > 1) {
-                std::random_device rd;
-                std::mt19937 gen(rd());
-                
                 for (std::int32_t i = 0; i < count; ++i) {
-                    if (!ShouldDropItem(item, a_actor)) {
-                        removeCount++;
+                    if (ShouldDropItem(item, a_actor)) {
+                        dropCount++;
                     }
                 }
-            } else if (!shouldDrop) {
-                removeCount = 1;
-            }
-            
-            if (removeCount > 0) {
-                itemsToRemove.push_back({item, removeCount});
-            }
-        }
-    }
-    
-    // Remove unequipped filtered items
-    for (const auto& [item, count] : itemsToRemove) {
-        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
-    }
-}
-
-bool LootManager::IsItemEquipped(RE::Actor* a_actor, RE::TESBoundObject* a_item) {
-    if (!a_actor || !a_item) return false;
-    
-    auto inventory = a_actor->GetInventory();
-    auto it = inventory.find(a_item);
-    
-    if (it != inventory.end()) {
-        auto& [count, entry] = it->second;
-        if (entry && entry->extraLists) {
-            for (auto* xList : *entry->extraLists) {
-                if (xList && xList->HasType(RE::ExtraDataType::kWorn)) {
-                    return true;
+            } else {
+                if (ShouldDropItem(item, a_actor)) {
+                    dropCount = 1;
                 }
             }
+            
+            if (dropCount > 0) {
+                lootableItems.push_back({item, dropCount});
+            }
         }
     }
     
-    return false;
+    // Only create container if there are lootable items
+    if (lootableItems.empty()) {
+        // Disable looting on the corpse
+        a_actor->SetActivate(false);
+        return;
+    }
+    
+    // Create container at actor's position
+    auto* cell = a_actor->GetParentCell();
+    if (!cell) return;
+    
+    auto position = a_actor->GetPosition();
+    auto angle = a_actor->GetAngle();
+    
+    auto* container = cell->PlaceObjectAtMe(containerBase, false);
+    if (!container) {
+        logger::error("Failed to create loot container");
+        return;
+    }
+    
+    // Position container at corpse
+    container->SetPosition(position);
+    container->SetAngle(angle);
+    
+    // Make container invisible and enable it
+    container->SetDisplayName(a_actor->GetDisplayFullName(), true);
+    
+    // Transfer lootable items to container
+    for (const auto& [item, count] : lootableItems) {
+        // Remove from corpse without dropping
+        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+        
+        // Add to container
+        container->AddObjectToContainer(item, nullptr, count, nullptr);
+    }
+    
+    // Disable looting on the corpse to force interaction with container
+    a_actor->SetActivate(false);
+    
+    // Make sure container is enabled and can be activated
+    container->Enable(false);
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
@@ -186,20 +194,12 @@ bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor)
         return true;
     }
     
-    // Always drop keys to prevent quest issues
-    if (a_item->GetFormType() == RE::FormType::Key) {
-        return true;
-    }
-    
-    // Check for keys in misc items
+    // Quest items always drop to prevent quest breakage
     if (a_item->GetFormType() == RE::FormType::Misc) {
         if (auto* miscItem = a_item->As<RE::TESObjectMISC>()) {
-            if (miscItem && miscItem->GetFullName()) {
-                std::string_view name(miscItem->GetFullName());
-                if (name.find("Key") != std::string_view::npos || 
-                    name.find("key") != std::string_view::npos) {
-                    return true;
-                }
+            if (miscItem && miscItem->GetFullName() && 
+                std::string_view(miscItem->GetFullName()).find("Key") != std::string_view::npos) {
+                return true;
             }
         }
     }
@@ -270,38 +270,12 @@ float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor)
         if (base) {
             if (a_actor->GetLevel() > 30) {
                 multiplier *= settings->bossMultiplier;
-            } else if (base->GetRace() && base->GetRace()->formEditorID.contains("Bandit")) {
+            }
+            else if (base->GetRace() && base->GetRace()->formEditorID.contains("Bandit")) {
                 multiplier *= settings->banditMultiplier;
             }
         }
     }
     
     return std::min(1.0f, baseChance * multiplier);
-}
-
-void LootManager::BlockItem(RE::Actor* a_actor, RE::TESBoundObject* a_item) {
-    if (!a_actor || !a_item) return;
-    
-    std::lock_guard<std::mutex> lock(blockedItemsMutex);
-    blockedItems[a_actor->GetFormID()].insert(a_item->GetFormID());
-}
-
-bool LootManager::IsItemBlocked(RE::Actor* a_actor, RE::TESBoundObject* a_item) {
-    if (!a_actor || !a_item) return false;
-    
-    std::lock_guard<std::mutex> lock(blockedItemsMutex);
-    
-    auto it = blockedItems.find(a_actor->GetFormID());
-    if (it == blockedItems.end()) {
-        return false;
-    }
-    
-    return it->second.count(a_item->GetFormID()) > 0;
-}
-
-void LootManager::CleanupBlockedItems(RE::Actor* a_actor) {
-    if (!a_actor) return;
-    
-    std::lock_guard<std::mutex> lock(blockedItemsMutex);
-    blockedItems.erase(a_actor->GetFormID());
 }
