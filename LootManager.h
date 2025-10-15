@@ -13,12 +13,6 @@ public:
         const RE::TESDeathEvent* a_event,
         RE::BSTEventSource<RE::TESDeathEvent>* a_eventSource) override;
 
-    void Register();
-    
-    RE::BSEventNotifyControl ProcessEvent(
-        const RE::TESDeathEvent* a_event,
-        RE::BSTEventSource<RE::TESDeathEvent>* a_eventSource) override;
-
 private:
     LootManager() = default;
     ~LootManager() = default;
