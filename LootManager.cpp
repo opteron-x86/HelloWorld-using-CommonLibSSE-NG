@@ -6,7 +6,7 @@ void LootManager::Register() {
     auto* scriptEventSource = RE::ScriptEventSourceHolder::GetSingleton();
     if (scriptEventSource) {
         scriptEventSource->AddEventSink<RE::TESDeathEvent>(this);
-        scriptEventSource->AddEventSink<RE::TESOpenCloseEvent>(this);
+        scriptEventSource->AddEventSink<RE::TESActivateEvent>(this);
     }
 }
 
@@ -28,34 +28,26 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
 }
 
 RE::BSEventNotifyControl LootManager::ProcessEvent(
-    const RE::TESOpenCloseEvent* a_event,
-    RE::BSTEventSource<RE::TESOpenCloseEvent>*) {
+    const RE::TESActivateEvent* a_event,
+    RE::BSTEventSource<RE::TESActivateEvent>*) {
     
-    if (!a_event || !a_event->ref) {
+    if (!a_event || !a_event->objectActivated) {
         return RE::BSEventNotifyControl::kContinue;
     }
     
-    RE::ConsoleLog::GetSingleton()->Print("OpenClose event: ref=%X, opened=%d", 
-                                          a_event->ref->GetFormID(), a_event->opened);
-    
-    auto* actor = a_event->ref->As<RE::Actor>();
-    if (!actor) {
-        RE::ConsoleLog::GetSingleton()->Print("  Not an actor");
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    if (!player || !a_event->actionRef || a_event->actionRef->GetFormID() != player->GetFormID()) {
         return RE::BSEventNotifyControl::kContinue;
     }
     
-    if (!actor->IsDead()) {
-        RE::ConsoleLog::GetSingleton()->Print("  Actor not dead");
+    auto* actor = a_event->objectActivated->As<RE::Actor>();
+    if (!actor || !actor->IsDead()) {
         return RE::BSEventNotifyControl::kContinue;
     }
     
-    RE::ConsoleLog::GetSingleton()->Print("  Dead actor detected, opened=%d", a_event->opened);
+    RE::ConsoleLog::GetSingleton()->Print("Player activated dead actor: %X", actor->GetFormID());
     
-    if (a_event->opened) {
-        RemoveNonLootableItems(actor);
-    } else {
-        RestoreNonLootableItems(actor);
-    }
+    FilterCorpseInventory(actor);
     
     return RE::BSEventNotifyControl::kContinue;
 }
@@ -144,31 +136,36 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
     actorLootData[a_actor->GetFormID()] = std::move(lootData);
 }
 
-void LootManager::RemoveNonLootableItems(RE::Actor* a_actor) {
+void LootManager::FilterCorpseInventory(RE::Actor* a_actor) {
     if (!a_actor) return;
     
     std::lock_guard<std::mutex> lock(dataMutex);
     
     auto it = actorLootData.find(a_actor->GetFormID());
     if (it == actorLootData.end()) {
+        RE::ConsoleLog::GetSingleton()->Print("  No loot data found for actor");
         return;
     }
     
     auto& lootData = it->second;
     
+    if (lootData.processed) {
+        RE::ConsoleLog::GetSingleton()->Print("  Already processed");
+        return;
+    }
+    
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(now - lootData.timestamp);
     
     if (elapsed.count() > 10) {
+        RE::ConsoleLog::GetSingleton()->Print("  Data expired");
         actorLootData.erase(it);
         return;
     }
     
-    lootData.removedItems.clear();
-    
     auto inventory = a_actor->GetInventory();
     
-    RE::ConsoleLog::GetSingleton()->Print("Container opened for actor %X", a_actor->GetFormID());
+    RE::ConsoleLog::GetSingleton()->Print("  Filtering inventory...");
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
@@ -181,35 +178,47 @@ void LootManager::RemoveNonLootableItems(RE::Actor* a_actor) {
             continue;
         }
         
-        if (!lootData.lootableItems.contains(item->GetFormID())) {
-            RE::ConsoleLog::GetSingleton()->Print("  Removing non-lootable: %s (x%d)", 
-                                                  item->GetName(), count);
-            lootData.removedItems.push_back({item, count});
-            a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+        if (lootData.lootableItems.contains(item->GetFormID())) {
+            continue;
         }
+        
+        if (IsItemEquipped(a_actor, item)) {
+            RE::ConsoleLog::GetSingleton()->Print("    Keeping equipped: %s", item->GetName());
+            continue;
+        }
+        
+        RE::ConsoleLog::GetSingleton()->Print("    Removing: %s (x%d)", item->GetName(), count);
+        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
     }
+    
+    lootData.processed = true;
 }
 
-void LootManager::RestoreNonLootableItems(RE::Actor* a_actor) {
-    if (!a_actor) return;
-    
-    std::lock_guard<std::mutex> lock(dataMutex);
-    
-    auto it = actorLootData.find(a_actor->GetFormID());
-    if (it == actorLootData.end()) {
-        return;
+bool LootManager::IsItemEquipped(RE::Actor* a_actor, RE::TESBoundObject* a_item) {
+    if (!a_actor || !a_item) {
+        return false;
     }
     
-    auto& lootData = it->second;
+    auto inventory = a_actor->GetInventory();
+    auto it = inventory.find(a_item);
     
-    RE::ConsoleLog::GetSingleton()->Print("Container closed for actor %X, restoring %zu items", 
-                                          a_actor->GetFormID(), lootData.removedItems.size());
-    
-    for (const auto& [item, count] : lootData.removedItems) {
-        a_actor->AddObjectToContainer(item, nullptr, count, nullptr);
+    if (it == inventory.end()) {
+        return false;
     }
     
-    lootData.removedItems.clear();
+    auto& [count, entry] = it->second;
+    if (!entry || !entry->extraLists) {
+        return false;
+    }
+    
+    for (auto* xList : *entry->extraLists) {
+        if (xList && xList->HasType(RE::ExtraDataType::kWorn) || 
+            xList && xList->HasType(RE::ExtraDataType::kWornLeft)) {
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {

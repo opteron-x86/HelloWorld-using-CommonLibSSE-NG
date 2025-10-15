@@ -1,7 +1,7 @@
 #pragma once
 
 class LootManager : public RE::BSTEventSink<RE::TESDeathEvent>,
-                    public RE::BSTEventSink<RE::TESOpenCloseEvent> {
+                    public RE::BSTEventSink<RE::TESActivateEvent> {
 public:
     static LootManager* GetSingleton() {
         static LootManager singleton;
@@ -15,8 +15,8 @@ public:
         RE::BSTEventSource<RE::TESDeathEvent>* a_eventSource) override;
     
     RE::BSEventNotifyControl ProcessEvent(
-        const RE::TESOpenCloseEvent* a_event,
-        RE::BSTEventSource<RE::TESOpenCloseEvent>* a_eventSource) override;
+        const RE::TESActivateEvent* a_event,
+        RE::BSTEventSource<RE::TESActivateEvent>* a_eventSource) override;
 
 private:
     LootManager() = default;
@@ -32,13 +32,13 @@ private:
     void DetermineLootableItems(RE::Actor* a_actor);
     bool ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor);
     float GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor);
-    void RemoveNonLootableItems(RE::Actor* a_actor);
-    void RestoreNonLootableItems(RE::Actor* a_actor);
+    void FilterCorpseInventory(RE::Actor* a_actor);
+    bool IsItemEquipped(RE::Actor* a_actor, RE::TESBoundObject* a_item);
     
     struct LootableItemData {
         std::unordered_set<RE::FormID> lootableItems;
-        std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> removedItems;
         std::chrono::steady_clock::time_point timestamp;
+        bool processed{false};
     };
     
     std::unordered_map<RE::FormID, LootableItemData> actorLootData;
