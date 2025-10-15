@@ -66,39 +66,51 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
     if (!a_actor) return;
     
     auto inventory = a_actor->GetInventory();
-    
-    std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToRemove;
+    auto actorRef = a_actor->GetActorBase();
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
-        if (item && count > 0 && !ShouldDropItem(item, a_actor)) {
-            // Calculate how many to remove
-            std::int32_t removeCount = 0;
-            
-            // For stackable items, randomly determine how many drop
-            if (count > 1) {
-                std::random_device rd;
-                std::mt19937 gen(rd());
-                
-                for (std::int32_t i = 0; i < count; ++i) {
-                    if (!ShouldDropItem(item, a_actor)) {
-                        removeCount++;
+        if (!item || count <= 0 || item->IsGold()) {
+            continue;
+        }
+        
+        // Process each instance of this item type
+        if (entry && entry->extraLists) {
+            for (auto* extraList : *entry->extraLists) {
+                if (extraList && !ShouldDropItem(item, a_actor)) {
+                    // Mark as owned by the dead NPC - player can't loot it
+                    if (!extraList->HasType(RE::ExtraDataType::kOwnership)) {
+                        auto extraOwnership = RE::BSExtraData::Create<RE::ExtraOwnership>();
+                        if (extraOwnership) {
+                            extraOwnership->owner = actorRef;
+                            extraList->Add(extraOwnership);
+                        }
                     }
                 }
-            } else {
-                removeCount = 1;
-            }
-            
-            if (removeCount > 0) {
-                itemsToRemove.push_back({item, removeCount});
             }
         }
-    }
-    
-    // Remove filtered items
-    for (const auto& [item, count] : itemsToRemove) {
-        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+        // Handle items without extra lists
+        else if (!ShouldDropItem(item, a_actor)) {
+            auto changes = a_actor->GetInventoryChanges();
+            if (changes && changes->entryList) {
+                for (auto& invEntry : *changes->entryList) {
+                    if (invEntry && invEntry->object == item) {
+                        if (!invEntry->extraLists) {
+                            invEntry->extraLists = new std::remove_pointer_t<decltype(invEntry->extraLists)>();
+                        }
+                        
+                        auto extraList = new RE::ExtraDataList();
+                        auto extraOwnership = RE::BSExtraData::Create<RE::ExtraOwnership>();
+                        if (extraOwnership && extraList) {
+                            extraOwnership->owner = actorRef;
+                            extraList->Add(extraOwnership);
+                            invEntry->extraLists->push_back(extraList);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
