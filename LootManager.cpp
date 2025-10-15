@@ -43,11 +43,17 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     auto* oldContainer = RE::TESForm::LookupByID<RE::TESObjectREFR>(a_event->oldContainer);
     auto* item = RE::TESForm::LookupByID<RE::TESBoundObject>(a_event->baseObj);
     
+    RE::ConsoleLog::GetSingleton()->Print("Container event: oldContainer=%X, item=%X, count=%d", 
+                                          a_event->oldContainer, a_event->baseObj, a_event->itemCount);
+    
     if (!oldContainer || !item) {
         return RE::BSEventNotifyControl::kContinue;
     }
     
-    if (!IsItemLootable(oldContainer, item)) {
+    bool isLootable = IsItemLootable(oldContainer, item);
+    RE::ConsoleLog::GetSingleton()->Print("  IsLootable: %s", isLootable ? "YES" : "NO");
+    
+    if (!isLootable) {
         player->RemoveItem(item, a_event->itemCount, RE::ITEM_REMOVE_REASON::kStoreInContainer, 
                           nullptr, oldContainer);
         
@@ -122,6 +128,9 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
     LootableItemData lootData;
     lootData.timestamp = std::chrono::steady_clock::now();
     
+    RE::ConsoleLog::GetSingleton()->Print("Processing actor: %X with %zu items", 
+                                          a_actor->GetFormID(), inventory.size());
+    
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
@@ -134,25 +143,36 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
             continue;
         }
         
+        bool shouldDrop = false;
         if (count > 1) {
             std::random_device rd;
             std::mt19937 gen(rd());
             
             for (std::int32_t i = 0; i < count; ++i) {
                 if (ShouldDropItem(item, a_actor)) {
-                    lootData.lootableItems.insert(item->GetFormID());
+                    shouldDrop = true;
                     break;
                 }
             }
         } else {
-            if (ShouldDropItem(item, a_actor)) {
-                lootData.lootableItems.insert(item->GetFormID());
-            }
+            shouldDrop = ShouldDropItem(item, a_actor);
         }
+        
+        if (shouldDrop) {
+            lootData.lootableItems.insert(item->GetFormID());
+        }
+        
+        RE::ConsoleLog::GetSingleton()->Print("  Item %X (%s): %s", 
+                                              item->GetFormID(),
+                                              item->GetName(),
+                                              shouldDrop ? "LOOTABLE" : "BLOCKED");
     }
     
     std::lock_guard<std::mutex> lock(dataMutex);
     actorLootData[a_actor->GetFormID()] = std::move(lootData);
+    
+    RE::ConsoleLog::GetSingleton()->Print("Stored %zu lootable items for actor %X", 
+                                          lootData.lootableItems.size(), a_actor->GetFormID());
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
