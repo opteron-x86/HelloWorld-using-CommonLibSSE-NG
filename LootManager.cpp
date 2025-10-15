@@ -6,7 +6,7 @@ void LootManager::Register() {
     auto* scriptEventSource = RE::ScriptEventSourceHolder::GetSingleton();
     if (scriptEventSource) {
         scriptEventSource->AddEventSink<RE::TESDeathEvent>(this);
-        scriptEventSource->AddEventSink<RE::TESContainerChangedEvent>(this);
+        scriptEventSource->AddEventSink<RE::TESOpenCloseEvent>(this);
     }
 }
 
@@ -28,66 +28,25 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
 }
 
 RE::BSEventNotifyControl LootManager::ProcessEvent(
-    const RE::TESContainerChangedEvent* a_event,
-    RE::BSTEventSource<RE::TESContainerChangedEvent>*) {
+    const RE::TESOpenCloseEvent* a_event,
+    RE::BSTEventSource<RE::TESOpenCloseEvent>*) {
     
-    if (!a_event) {
+    if (!a_event || !a_event->ref) {
         return RE::BSEventNotifyControl::kContinue;
     }
     
-    auto* player = RE::PlayerCharacter::GetSingleton();
-    if (!player || a_event->newContainer != player->GetFormID()) {
+    auto* actor = a_event->ref->As<RE::Actor>();
+    if (!actor || !actor->IsDead()) {
         return RE::BSEventNotifyControl::kContinue;
     }
     
-    auto* oldContainer = RE::TESForm::LookupByID<RE::TESObjectREFR>(a_event->oldContainer);
-    auto* item = RE::TESForm::LookupByID<RE::TESBoundObject>(a_event->baseObj);
-    
-    RE::ConsoleLog::GetSingleton()->Print("Container event: oldContainer=%X, item=%X, count=%d", 
-                                          a_event->oldContainer, a_event->baseObj, a_event->itemCount);
-    
-    if (!oldContainer || !item) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    bool isLootable = IsItemLootable(oldContainer, item);
-    RE::ConsoleLog::GetSingleton()->Print("  IsLootable: %s", isLootable ? "YES" : "NO");
-    
-    if (!isLootable) {
-        player->RemoveItem(item, a_event->itemCount, RE::ITEM_REMOVE_REASON::kStoreInContainer, 
-                          nullptr, oldContainer);
-        
-        RE::DebugNotification("You cannot take that item.");
+    if (a_event->opened) {
+        RemoveNonLootableItems(actor);
+    } else {
+        RestoreNonLootableItems(actor);
     }
     
     return RE::BSEventNotifyControl::kContinue;
-}
-
-bool LootManager::IsItemLootable(RE::TESObjectREFR* a_container, RE::TESBoundObject* a_item) {
-    if (!a_container || !a_item) {
-        return true;
-    }
-    
-    if (a_item->IsGold()) {
-        return true;
-    }
-    
-    std::lock_guard<std::mutex> lock(dataMutex);
-    
-    auto it = actorLootData.find(a_container->GetFormID());
-    if (it == actorLootData.end()) {
-        return true;
-    }
-    
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(now - it->second.timestamp);
-    
-    if (elapsed.count() > 10) {
-        actorLootData.erase(it);
-        return true;
-    }
-    
-    return it->second.lootableItems.contains(a_item->GetFormID());
 }
 
 void LootManager::ProcessActorDeath(RE::Actor* a_actor) {
@@ -169,10 +128,77 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
     }
     
     std::lock_guard<std::mutex> lock(dataMutex);
-    actorLootData[a_actor->GetFormID()] = std::move(lootData);
-    
-    RE::ConsoleLog::GetSingleton()->Print("Stored %zu lootable items for actor %X", 
+    RE::ConsoleLog::GetSingleton()->Print("Storing %zu lootable items for actor %X", 
                                           lootData.lootableItems.size(), a_actor->GetFormID());
+    actorLootData[a_actor->GetFormID()] = std::move(lootData);
+}
+
+void LootManager::RemoveNonLootableItems(RE::Actor* a_actor) {
+    if (!a_actor) return;
+    
+    std::lock_guard<std::mutex> lock(dataMutex);
+    
+    auto it = actorLootData.find(a_actor->GetFormID());
+    if (it == actorLootData.end()) {
+        return;
+    }
+    
+    auto& lootData = it->second;
+    
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(now - lootData.timestamp);
+    
+    if (elapsed.count() > 10) {
+        actorLootData.erase(it);
+        return;
+    }
+    
+    lootData.removedItems.clear();
+    
+    auto inventory = a_actor->GetInventory();
+    
+    RE::ConsoleLog::GetSingleton()->Print("Container opened for actor %X", a_actor->GetFormID());
+    
+    for (const auto& [item, data] : inventory) {
+        auto& [count, entry] = data;
+        
+        if (!item || count <= 0) {
+            continue;
+        }
+        
+        if (item->IsGold()) {
+            continue;
+        }
+        
+        if (!lootData.lootableItems.contains(item->GetFormID())) {
+            RE::ConsoleLog::GetSingleton()->Print("  Removing non-lootable: %s (x%d)", 
+                                                  item->GetName(), count);
+            lootData.removedItems.push_back({item, count});
+            a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+        }
+    }
+}
+
+void LootManager::RestoreNonLootableItems(RE::Actor* a_actor) {
+    if (!a_actor) return;
+    
+    std::lock_guard<std::mutex> lock(dataMutex);
+    
+    auto it = actorLootData.find(a_actor->GetFormID());
+    if (it == actorLootData.end()) {
+        return;
+    }
+    
+    auto& lootData = it->second;
+    
+    RE::ConsoleLog::GetSingleton()->Print("Container closed for actor %X, restoring %zu items", 
+                                          a_actor->GetFormID(), lootData.removedItems.size());
+    
+    for (const auto& [item, count] : lootData.removedItems) {
+        a_actor->AddObjectToContainer(item, nullptr, count, nullptr);
+    }
+    
+    lootData.removedItems.clear();
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
