@@ -1,7 +1,6 @@
 #pragma once
 
-class LootManager : public RE::BSTEventSink<RE::TESDeathEvent>,
-                    public RE::BSTEventSink<RE::TESContainerChangedEvent> {
+class LootManager : public RE::BSTEventSink<RE::TESDeathEvent> {
 public:
     static LootManager* GetSingleton() {
         static LootManager singleton;
@@ -13,10 +12,6 @@ public:
     RE::BSEventNotifyControl ProcessEvent(
         const RE::TESDeathEvent* a_event,
         RE::BSTEventSource<RE::TESDeathEvent>* a_eventSource) override;
-        
-    RE::BSEventNotifyControl ProcessEvent(
-        const RE::TESContainerChangedEvent* a_event,
-        RE::BSTEventSource<RE::TESContainerChangedEvent>* a_eventSource) override;
 
 private:
     LootManager() = default;
@@ -29,19 +24,11 @@ private:
     
     void ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer);
     bool ShouldProcessActor(RE::Actor* a_actor);
-    void MarkNonLootableItems(RE::Actor* a_actor);
+    void ProcessLoot(RE::Actor* a_actor);
     bool ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor);
     float GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor);
-    
-    void SetItemRestricted(RE::Actor* a_actor, RE::TESBoundObject* a_item, bool a_restricted);
-    bool IsItemRestricted(RE::Actor* a_actor, RE::TESBoundObject* a_item);
+    RE::TESObjectREFR* CreateLootContainer(RE::Actor* a_actor);
     
     std::atomic<bool> enabled{true};
     std::mutex processingMutex;
-    
-    // Track which actors have been processed
-    std::unordered_set<RE::FormID> processedActors;
-    std::mutex actorSetMutex;
-    
-    static constexpr const char* RESTRICTED_FLAG = "LDS_NoLoot";
 };
