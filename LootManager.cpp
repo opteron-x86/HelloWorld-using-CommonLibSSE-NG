@@ -49,7 +49,7 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
         return RE::BSEventNotifyControl::kContinue;
     }
     
-    RE::ConsoleLog::GetSingleton()->Print("  Dead actor corpse accessed");
+    RE::ConsoleLog::GetSingleton()->Print("  Dead actor detected, opened=%d", a_event->opened);
     
     if (a_event->opened) {
         RemoveNonLootableItems(actor);
