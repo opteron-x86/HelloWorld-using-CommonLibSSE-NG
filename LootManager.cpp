@@ -6,7 +6,6 @@ void LootManager::Register() {
     auto* scriptEventSource = RE::ScriptEventSourceHolder::GetSingleton();
     if (scriptEventSource) {
         scriptEventSource->AddEventSink<RE::TESDeathEvent>(this);
-        scriptEventSource->AddEventSink<RE::TESActivateEvent>(this);
     }
 }
 
@@ -56,10 +55,11 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor) {
     auto actorHandle = a_actor->GetHandle();
     
     std::thread([this, actorHandle]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         
         auto* actor = actorHandle.get().get();
         if (actor) {
+            std::lock_guard<std::mutex> lock(processingMutex);
             DetermineLootableItems(actor);
         }
     }).detach();
@@ -86,9 +86,7 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
     if (!a_actor) return;
     
     auto inventory = a_actor->GetInventory();
-    
-    LootableItemData lootData;
-    lootData.timestamp = std::chrono::steady_clock::now();
+    std::unordered_set<RE::FormID> lootableItems;
     
     RE::ConsoleLog::GetSingleton()->Print("Processing actor: %X with %zu items", 
                                           a_actor->GetFormID(), inventory.size());
@@ -101,7 +99,7 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
         }
         
         if (item->IsGold()) {
-            lootData.lootableItems.insert(item->GetFormID());
+            lootableItems.insert(item->GetFormID());
             continue;
         }
         
@@ -121,7 +119,7 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
         }
         
         if (shouldDrop) {
-            lootData.lootableItems.insert(item->GetFormID());
+            lootableItems.insert(item->GetFormID());
         }
         
         RE::ConsoleLog::GetSingleton()->Print("  Item %X (%s): %s", 
@@ -130,10 +128,10 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
                                               shouldDrop ? "LOOTABLE" : "BLOCKED");
     }
     
-    std::lock_guard<std::mutex> lock(dataMutex);
-    RE::ConsoleLog::GetSingleton()->Print("Storing %zu lootable items for actor %X", 
-                                          lootData.lootableItems.size(), a_actor->GetFormID());
-    actorLootData[a_actor->GetFormID()] = std::move(lootData);
+    RE::ConsoleLog::GetSingleton()->Print("Determined %zu lootable items, filtering inventory", 
+                                          lootableItems.size());
+    
+    FilterCorpseInventory(a_actor, lootableItems);
 }
 
 void LootManager::FilterCorpseInventory(RE::Actor* a_actor) {

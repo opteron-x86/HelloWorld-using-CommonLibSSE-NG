@@ -1,7 +1,6 @@
 #pragma once
 
-class LootManager : public RE::BSTEventSink<RE::TESDeathEvent>,
-                    public RE::BSTEventSink<RE::TESActivateEvent> {
+class LootManager : public RE::BSTEventSink<RE::TESDeathEvent> {
 public:
     static LootManager* GetSingleton() {
         static LootManager singleton;
@@ -13,10 +12,6 @@ public:
     RE::BSEventNotifyControl ProcessEvent(
         const RE::TESDeathEvent* a_event,
         RE::BSTEventSource<RE::TESDeathEvent>* a_eventSource) override;
-    
-    RE::BSEventNotifyControl ProcessEvent(
-        const RE::TESActivateEvent* a_event,
-        RE::BSTEventSource<RE::TESActivateEvent>* a_eventSource) override;
 
 private:
     LootManager() = default;
@@ -32,16 +27,9 @@ private:
     void DetermineLootableItems(RE::Actor* a_actor);
     bool ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor);
     float GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor);
-    void FilterCorpseInventory(RE::Actor* a_actor);
+    void FilterCorpseInventory(RE::Actor* a_actor, const std::unordered_set<RE::FormID>& lootableItems);
     bool IsItemEquipped(RE::Actor* a_actor, RE::TESBoundObject* a_item);
     
-    struct LootableItemData {
-        std::unordered_set<RE::FormID> lootableItems;
-        std::chrono::steady_clock::time_point timestamp;
-        bool processed{false};
-    };
-    
-    std::unordered_map<RE::FormID, LootableItemData> actorLootData;
-    std::mutex dataMutex;
+    std::mutex processingMutex;
     std::atomic<bool> enabled{true};
 };
