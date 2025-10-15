@@ -115,15 +115,17 @@ void LootManager::GenerateLootTable(RE::Actor* a_actor) {
 
 void LootManager::FilterContainerMenu() {
     auto* ui = RE::UI::GetSingleton();
-    auto* containerMenu = ui ? ui->GetMenu<RE::ContainerMenu>() : nullptr;
+    if (!ui) return;
     
+    auto containerMenu = ui->GetMenu<RE::ContainerMenu>();
     if (!containerMenu) return;
     
-    // Get the container reference
-    auto containerRef = containerMenu->GetContainerRef();
-    if (!containerRef) return;
+    // Get the container reference from menu
+    auto refHandle = containerMenu->GetTargetRefHandle();
+    auto refPtr = refHandle.get();
+    if (!refPtr) return;
     
-    auto* actor = containerRef->As<RE::Actor>();
+    auto* actor = refPtr->As<RE::Actor>();
     if (!actor || !actor->IsDead()) return;
     
     // Check if we have a loot table for this actor
@@ -140,7 +142,7 @@ void LootManager::FilterContainerMenu() {
     // Filter items - hide non-lootable items
     std::vector<RE::ItemList::Item*> itemsToHide;
     
-    for (auto& item : inventoryData->items) {
+    for (auto* item : inventoryData->items) {
         if (!item || !item->data.objDesc) continue;
         
         auto* boundObject = item->data.objDesc->object;
@@ -164,7 +166,7 @@ void LootManager::FilterContainerMenu() {
             }
             
             if (!anyLootable) {
-                itemsToHide.push_back(&item);
+                itemsToHide.push_back(item);
             }
         }
     }

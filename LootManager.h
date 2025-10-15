@@ -35,7 +35,7 @@ private:
     void FilterContainerMenu();
     
     // Map of actor FormID to items that should be lootable
-    std::unordered_map<RE::FormID, std::unordered_set<RE::FormID>> lootableTables;
+    std::unordered_map<RE::FormID, std::set<RE::FormID>> lootableTables;
     std::mutex lootTableMutex;
     std::atomic<bool> enabled{true};
 };
