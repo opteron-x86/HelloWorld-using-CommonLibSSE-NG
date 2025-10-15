@@ -194,10 +194,36 @@ void LootManager::CreateLootContainer(RE::Actor* a_corpse, RE::Actor* a_activato
         }
     }
     
-    // Create new container - using a chest from base game
-    auto* containerBase = RE::TESForm::LookupByID<RE::TESObjectCONT>(0x00070008); // Chest01
+    // Find a container base form - try multiple common containers
+    RE::TESObjectCONT* containerBase = nullptr;
+    
+    // Try common chest FormIDs
+    std::vector<RE::FormID> chestIDs = {
+        0x000E76BC,  // ChestSmall
+        0x00000A3D,  // Barrel01
+        0x000ACBB9,  // CommonSack
+    };
+    
+    for (auto formID : chestIDs) {
+        containerBase = RE::TESForm::LookupByID<RE::TESObjectCONT>(formID);
+        if (containerBase) break;
+    }
+    
+    // Fallback: search data handler for any container
     if (!containerBase) {
-        RE::ConsoleLog::GetSingleton()->Print("LootDropSystem: Failed to find container base");
+        auto* dataHandler = RE::TESDataHandler::GetSingleton();
+        if (dataHandler) {
+            for (auto* cont : dataHandler->GetFormArray<RE::TESObjectCONT>()) {
+                if (cont && !cont->IsDeleted()) {
+                    containerBase = cont;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if (!containerBase) {
+        RE::ConsoleLog::GetSingleton()->Print("LootDropSystem: Failed to find any container base");
         return;
     }
     
@@ -207,7 +233,7 @@ void LootManager::CreateLootContainer(RE::Actor* a_corpse, RE::Actor* a_activato
         return;
     }
     
-    // Make container invisible and position it at corpse
+    // Position at corpse
     container->SetPosition(a_corpse->GetPosition());
     container->data.angle = a_corpse->data.angle;
     
@@ -222,7 +248,6 @@ void LootManager::CreateLootContainer(RE::Actor* a_corpse, RE::Actor* a_activato
     lootData.containerHandle = container->GetHandle();
     lootData.hasContainer = true;
     
-    // Open the container
     container->Activate(a_activator, nullptr, 1, nullptr, 0);
     activeCorpseID = corpseID;
 }
