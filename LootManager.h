@@ -1,7 +1,6 @@
 #pragma once
 
-class LootManager : public RE::BSTEventSink<RE::TESDeathEvent>,
-                    public RE::BSTEventSink<RE::TESContainerChangedEvent> {
+class LootManager : public RE::BSTEventSink<RE::TESDeathEvent> {
 public:
     static LootManager* GetSingleton() {
         static LootManager singleton;
@@ -13,10 +12,6 @@ public:
     RE::BSEventNotifyControl ProcessEvent(
         const RE::TESDeathEvent* a_event,
         RE::BSTEventSource<RE::TESDeathEvent>* a_eventSource) override;
-        
-    RE::BSEventNotifyControl ProcessEvent(
-        const RE::TESContainerChangedEvent* a_event,
-        RE::BSTEventSource<RE::TESContainerChangedEvent>* a_eventSource) override;
 
 private:
     LootManager() = default;
@@ -29,11 +24,10 @@ private:
     
     void ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer);
     bool ShouldProcessActor(RE::Actor* a_actor);
-    void MarkLootableItems(RE::Actor* a_actor);
+    void FilterInventory(RE::Actor* a_actor);
     bool ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor);
     float GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor);
     
     std::atomic<bool> enabled{true};
     std::mutex processingMutex;
-    std::unordered_map<RE::FormID, std::unordered_set<RE::FormID>> lootableItems;
 };

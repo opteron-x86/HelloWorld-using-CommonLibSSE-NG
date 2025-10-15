@@ -34,12 +34,11 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
     std::thread([this, actorHandle]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         
-        RE::NiPointer<RE::Actor> actor;
-        RE::LookupReferenceByHandle(actorHandle, actor);
+        auto* actor = actorHandle.get().get();
         
         if (actor) {
             std::lock_guard<std::mutex> lock(processingMutex);
-            FilterInventory(actor.get());
+            FilterInventory(actor);
         }
     }).detach();
 }
