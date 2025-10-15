@@ -1,4 +1,3 @@
-// LootManager.cpp
 #include "LootManager.h"
 #include "Settings.h"
 #include <random>
@@ -38,11 +37,7 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor) {
         if (actor) {
             std::lock_guard<std::mutex> lock(processingMutex);
             ProcessInventory(actor);
-            
-            // Block activation so player can't open inventory directly
-            actor->GetActorRuntimeData().boolFlags.set(
-                RE::Actor::BOOL_FLAGS::kDontShowOnStealthMeter);
-            actor->AddToFaction(RE::TESForm::LookupByID<RE::TESFaction>(0x0005C84E), 0); // Prevent activation
+            actor->BlockActivation(true);
         }
     }).detach();
 }
@@ -71,7 +66,6 @@ bool LootManager::IsEquipped(RE::Actor* a_actor, RE::TESBoundObject* a_item) {
     equipped = a_actor->GetEquippedObject(true);
     if (equipped == a_item) return true;
     
-    // Check armor slots
     if (auto* armor = a_item->As<RE::TESObjectARMO>()) {
         auto slotMask = armor->GetSlotMask();
         auto* worn = a_actor->GetWornArmor(slotMask);
@@ -85,8 +79,6 @@ void LootManager::ProcessInventory(RE::Actor* a_actor) {
     if (!a_actor) return;
     
     auto inventory = a_actor->GetInventory();
-    RE::NiPoint3 dropLocation = a_actor->GetPosition();
-    dropLocation.z += 50.0f; // Slight elevation for visibility
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
@@ -98,17 +90,12 @@ void LootManager::ProcessInventory(RE::Actor* a_actor) {
         bool shouldDrop = isGold || ShouldDropItem(item, a_actor);
         
         if (shouldDrop) {
-            // Drop items on ground
             for (std::int32_t i = 0; i < count; ++i) {
-                if (auto* dropped = a_actor->DropObject(item, nullptr, 1)) {
-                    dropped->MoveTo(a_actor); // Ensure near corpse
-                }
+                a_actor->DropObject(item, nullptr, 1);
             }
         } else if (!isEquipped) {
-            // Remove non-equipped, non-droppable items
             a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
         }
-        // Equipped items that don't drop stay on corpse for visuals
     }
 }
 
