@@ -3,9 +3,10 @@
 #include <random>
 
 void LootManager::Register() {
-    auto* eventSource = RE::ScriptEventSourceHolder::GetSingleton();
-    if (eventSource) {
-        eventSource->AddEventSink<RE::TESDeathEvent>(this);
+    auto* deathSource = RE::ScriptEventSourceHolder::GetSingleton();
+    if (deathSource) {
+        deathSource->AddEventSink<RE::TESDeathEvent>(this);
+        deathSource->AddEventSink<RE::TESContainerChangedEvent>(this);
     }
 }
 
@@ -18,23 +19,67 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     }
     
     auto* actor = a_event->actorDying->As<RE::Actor>();
+    auto* killer = a_event->actorKiller ? a_event->actorKiller->As<RE::Actor>() : nullptr;
     
     if (actor && ShouldProcessActor(actor)) {
-        ProcessActorDeath(actor);
+        ProcessActorDeath(actor, killer);
     }
     
     return RE::BSEventNotifyControl::kContinue;
 }
 
-void LootManager::ProcessActorDeath(RE::Actor* a_actor) {
-    // Process after death animation completes
-    std::thread([this, actorHandle = a_actor->GetHandle()]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        
-        if (auto actor = actorHandle.get().get()) {
-            MarkNonLootableItems(actor);
-        }
-    }).detach();
+RE::BSEventNotifyControl LootManager::ProcessEvent(
+    const RE::TESContainerChangedEvent* a_event,
+    RE::BSTEventSource<RE::TESContainerChangedEvent>*) {
+    
+    if (!a_event || !a_event->oldContainer || a_event->newContainer != 0x14) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    
+    auto* form = RE::TESForm::LookupByID(a_event->oldContainer);
+    if (!form) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    
+    auto* actor = form->As<RE::Actor>();
+    if (!actor || !actor->IsDead()) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    
+    auto* item = RE::TESForm::LookupByID(a_event->baseObj);
+    auto* boundObj = item ? item->As<RE::TESBoundObject>() : nullptr;
+    
+    if (!boundObj) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    
+    // Check if item is lootable
+    if (!IsItemLootable(actor, boundObj)) {
+        // Return item to corpse immediately
+        SKSE::GetTaskInterface()->AddTask([actor, boundObj, count = a_event->itemCount]() {
+            if (actor) {
+                actor->AddObjectToContainer(boundObj, nullptr, count, nullptr);
+            }
+        });
+    }
+    
+    return RE::BSEventNotifyControl::kContinue;
+}
+
+void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
+    if (!a_actor) return;
+    
+    // Clean old entries periodically
+    auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(lootMapMutex);
+        std::erase_if(actorLootMap, [&](const auto& pair) {
+            return std::chrono::duration_cast<std::chrono::hours>(
+                now - pair.second.timestamp).count() > 24;
+        });
+    }
+    
+    DetermineLootableItems(a_actor);
 }
 
 bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
@@ -54,92 +99,81 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
     return true;
 }
 
-void LootManager::MarkNonLootableItems(RE::Actor* a_actor) {
+void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
     if (!a_actor) return;
     
-    // Build list of equipped items to preserve visual appearance
-    std::set<RE::FormID> equippedItems;
-    
-    // Check worn armor
-    auto* wornArmor = a_actor->GetWornArmor(RE::BIPED_MODEL::BipedObjectSlot::kBody);
-    if (wornArmor) equippedItems.insert(wornArmor->GetFormID());
-    
-    wornArmor = a_actor->GetWornArmor(RE::BIPED_MODEL::BipedObjectSlot::kHead);
-    if (wornArmor) equippedItems.insert(wornArmor->GetFormID());
-    
-    wornArmor = a_actor->GetWornArmor(RE::BIPED_MODEL::BipedObjectSlot::kHands);
-    if (wornArmor) equippedItems.insert(wornArmor->GetFormID());
-    
-    wornArmor = a_actor->GetWornArmor(RE::BIPED_MODEL::BipedObjectSlot::kFeet);
-    if (wornArmor) equippedItems.insert(wornArmor->GetFormID());
-    
-    // Check equipped weapons
-    auto* equippedRight = a_actor->GetEquippedObject(false);
-    if (equippedRight) equippedItems.insert(equippedRight->GetFormID());
-    
-    auto* equippedLeft = a_actor->GetEquippedObject(true);
-    if (equippedLeft) equippedItems.insert(equippedLeft->GetFormID());
-    
-    // Process inventory
     auto inventory = a_actor->GetInventory();
-    std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToRemove;
+    LootData lootData;
+    lootData.timestamp = std::chrono::steady_clock::now();
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
         if (!item || count <= 0) continue;
         
-        // Always keep gold
-        if (item->IsGold()) continue;
-        
-        // Always keep keys
-        if (item->GetFormType() == RE::FormType::Misc) {
-            if (auto* miscItem = item->As<RE::TESObjectMISC>()) {
-                if (miscItem->GetFullName() && 
-                    std::string_view(miscItem->GetFullName()).find("Key") != std::string_view::npos) {
-                    continue;
-                }
-            }
-        }
-        
-        // Keep equipped items for visual appearance
-        if (equippedItems.find(item->GetFormID()) != equippedItems.end()) {
+        // Gold always drops
+        if (item->IsGold()) {
+            lootData.lootableItems.insert(item->GetFormID());
             continue;
         }
         
-        // Determine removal count for non-equipped items
-        std::int32_t removeCount = 0;
-        
-        if (count > 1) {
-            std::random_device rd;
-            std::mt19937 gen(rd());
-            
-            for (std::int32_t i = 0; i < count; ++i) {
-                if (!ShouldDropItem(item, a_actor)) {
-                    removeCount++;
-                }
-            }
-        } else if (!ShouldDropItem(item, a_actor)) {
-            removeCount = 1;
+        // Quest items always drop
+        if (item->HasKeyword(0x0002A8E8)) { // QuestItem keyword
+            lootData.lootableItems.insert(item->GetFormID());
+            continue;
         }
         
-        if (removeCount > 0) {
-            itemsToRemove.push_back({item, removeCount});
+        // Keys always drop
+        if (item->IsKey()) {
+            lootData.lootableItems.insert(item->GetFormID());
+            continue;
+        }
+        
+        // Roll for each stack
+        bool anyDropped = false;
+        for (std::int32_t i = 0; i < count; ++i) {
+            if (ShouldDropItem(item, a_actor)) {
+                anyDropped = true;
+                break;
+            }
+        }
+        
+        if (anyDropped) {
+            lootData.lootableItems.insert(item->GetFormID());
         }
     }
     
-    // Remove non-lootable unequipped items
-    for (const auto& [item, count] : itemsToRemove) {
-        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+    // Store loot data
+    {
+        std::lock_guard<std::mutex> lock(lootMapMutex);
+        actorLootMap[a_actor->GetFormID()] = std::move(lootData);
     }
+}
+
+bool LootManager::IsItemLootable(RE::Actor* a_actor, RE::TESBoundObject* a_item) {
+    if (!a_actor || !a_item) return true;
+    
+    // Always allow gold
+    if (a_item->IsGold()) return true;
+    
+    // Always allow quest items
+    if (a_item->HasKeyword(0x0002A8E8)) return true;
+    
+    // Always allow keys
+    if (a_item->IsKey()) return true;
+    
+    std::lock_guard<std::mutex> lock(lootMapMutex);
+    auto it = actorLootMap.find(a_actor->GetFormID());
+    if (it == actorLootMap.end()) {
+        // No loot data means actor death wasn't processed, allow all
+        return true;
+    }
+    
+    return it->second.lootableItems.contains(a_item->GetFormID());
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
     if (!a_item) return true;
-    
-    if (a_item->IsGold()) {
-        return true;
-    }
     
     float dropChance = GetDropChance(a_item, a_actor);
     
@@ -159,32 +193,25 @@ float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor)
     case RE::FormType::Armor:
         baseChance = settings->armorDropChance;
         break;
-        
     case RE::FormType::Weapon:
         baseChance = settings->weaponDropChance;
         break;
-        
     case RE::FormType::Ammo:
         baseChance = settings->ammoDropChance;
         break;
-        
     case RE::FormType::AlchemyItem:
         baseChance = settings->potionDropChance;
         break;
-        
     case RE::FormType::Ingredient:
         baseChance = settings->ingredientDropChance;
         break;
-        
     case RE::FormType::Book:
     case RE::FormType::Scroll:
         baseChance = settings->bookDropChance;
         break;
-        
     case RE::FormType::Misc:
         baseChance = settings->miscDropChance;
         break;
-        
     case RE::FormType::SoulGem:
         baseChance = settings->soulgemDropChance;
         break;
