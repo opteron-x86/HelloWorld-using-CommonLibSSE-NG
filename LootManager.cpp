@@ -106,6 +106,8 @@ void LootManager::DropLootPhysically(RE::Actor* a_actor, const std::vector<Dropp
     std::uniform_real_distribution<float> angleDist(0.0f, 360.0f);
     std::uniform_real_distribution<float> radiusDist(50.0f, 120.0f);
     
+    auto corpsePos = a_actor->GetPosition();
+    
     for (const auto& [item, count] : items) {
         float angle = angleDist(gen) * (3.14159f / 180.0f);
         float radius = radiusDist(gen);
@@ -115,8 +117,12 @@ void LootManager::DropLootPhysically(RE::Actor* a_actor, const std::vector<Dropp
         
         auto droppedHandle = a_actor->DropObject(item, nullptr, count);
         if (auto dropped = droppedHandle.get(); dropped) {
-            auto corpsePos = a_actor->GetPosition();
-            dropped->MoveTo(a_actor, offsetX, offsetY, corpsePos.z + 50.0f);
+            RE::NiPoint3 dropPos;
+            dropPos.x = corpsePos.x + offsetX;
+            dropPos.y = corpsePos.y + offsetY;
+            dropPos.z = corpsePos.z + 50.0f;
+            
+            dropped->SetPosition(dropPos);
         }
     }
 }
