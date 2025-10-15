@@ -117,10 +117,12 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
             continue;
         }
         
-        // Quest items always drop
-        if (item->HasKeyword(0x0002A8E8)) { // QuestItem keyword
-            lootData.lootableItems.insert(item->GetFormID());
-            continue;
+        // Quest items always drop - check keyword form
+        if (auto* keywordForm = item->As<RE::BGSKeywordForm>()) {
+            if (keywordForm->HasKeyword(0x0002A8E8)) { // QuestItem keyword
+                lootData.lootableItems.insert(item->GetFormID());
+                continue;
+            }
         }
         
         // Keys always drop
@@ -156,8 +158,10 @@ bool LootManager::IsItemLootable(RE::Actor* a_actor, RE::TESBoundObject* a_item)
     // Always allow gold
     if (a_item->IsGold()) return true;
     
-    // Always allow quest items
-    if (a_item->HasKeyword(0x0002A8E8)) return true;
+    // Always allow quest items - check keyword form
+    if (auto* keywordForm = a_item->As<RE::BGSKeywordForm>()) {
+        if (keywordForm->HasKeyword(0x0002A8E8)) return true;
+    }
     
     // Always allow keys
     if (a_item->IsKey()) return true;
