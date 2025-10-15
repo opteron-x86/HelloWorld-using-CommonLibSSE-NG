@@ -138,10 +138,11 @@ void LootManager::CreateLootContainer(RE::Actor* a_actor) {
     }
     
     // Use PlaceObjectAtMe to spawn container
-    auto* container = a_actor->PlaceObjectAtMe(containerForm, false);
-    if (!container) {
+    auto containerPtr = a_actor->PlaceObjectAtMe(containerForm, false);
+    if (!containerPtr) {
         return;
     }
+    auto* container = containerPtr.get();
     
     // Position container at actor's exact location
     container->MoveTo(a_actor);
@@ -161,13 +162,9 @@ void LootManager::CreateLootContainer(RE::Actor* a_actor) {
         container->AddObjectToContainer(item, nullptr, count, nullptr);
     }
     
-    // Disable corpse looting by removing its activation
-    // We do this by setting the actor as "no activate"
-    using func_t = decltype(&RE::TESObjectREFR::SetActivationBlocked);
-    REL::Relocation<func_t> SetActivationBlocked{RELOCATION_ID(19371, 19797)};
-    if (SetActivationBlocked) {
-        SetActivationBlocked(a_actor, true);
-    }
+    // Disable corpse looting - player will interact with container instead
+    // Note: This makes the corpse unactivatable but it remains visible
+    a_actor->Disable();
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
