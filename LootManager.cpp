@@ -27,7 +27,7 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
-void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
+void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* /*a_killer*/) {
     auto actorHandle = a_actor->GetHandle();
     
     std::thread([this, actorHandle]() {
@@ -74,12 +74,17 @@ RE::TESObjectREFR* LootManager::CreateLootContainer(RE::Actor* a_actor) {
     RE::NiPoint3 pos = a_actor->GetPosition();
     pos.z += 10.0f;
     
-    auto* container = a_actor->PlaceObjectAtMe(containerBase, false);
-    if (container) {
-        container.get()->SetPosition(pos);
+    auto containerPtr = a_actor->PlaceObjectAtMe(containerBase, false);
+    if (!containerPtr) {
+        return nullptr;
     }
     
-    return container.get();
+    auto* container = containerPtr.get();
+    if (container) {
+        container->SetPosition(pos);
+    }
+    
+    return container;
 }
 
 void LootManager::ProcessLoot(RE::Actor* a_actor) {
@@ -103,7 +108,7 @@ void LootManager::ProcessLoot(RE::Actor* a_actor) {
         }
         
         // Keys always transfer
-        if (item->GetFormType() == RE::FormType::Key) {
+        if (auto* key = item->As<RE::TESKey>()) {
             itemsToDrop.push_back({item, count});
             continue;
         }
