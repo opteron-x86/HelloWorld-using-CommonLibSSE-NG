@@ -3,14 +3,9 @@
 #include <random>
 
 void LootManager::Register() {
-    auto* scriptEventSource = RE::ScriptEventSourceHolder::GetSingleton();
-    if (scriptEventSource) {
-        scriptEventSource->AddEventSink<RE::TESDeathEvent>(this);
-    }
-    
-    auto* uiEventSource = RE::UI::GetSingleton();
-    if (uiEventSource) {
-        uiEventSource->AddEventSink<RE::MenuOpenCloseEvent>(this);
+    auto* eventSource = RE::ScriptEventSourceHolder::GetSingleton();
+    if (eventSource) {
+        eventSource->AddEventSink<RE::TESDeathEvent>(this);
     }
 }
 
@@ -31,27 +26,15 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
-RE::BSEventNotifyControl LootManager::ProcessEvent(
-    const RE::MenuOpenCloseEvent* a_event,
-    RE::BSTEventSource<RE::MenuOpenCloseEvent>*) {
-    
-    if (!a_event || !a_event->opening) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    // Check if ContainerMenu is being opened
-    if (a_event->menuName == RE::ContainerMenu::MENU_NAME) {
-        FilterContainerMenu();
-    }
-    
-    return RE::BSEventNotifyControl::kContinue;
-}
-
 void LootManager::ProcessActorDeath(RE::Actor* a_actor) {
-    if (!a_actor) return;
-    
-    // Generate loot table immediately on death
-    GenerateLootTable(a_actor);
+    // Process after death animation completes
+    std::thread([this, actorHandle = a_actor->GetHandle()]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        
+        if (auto actor = actorHandle.get().get()) {
+            MarkNonLootableItems(actor);
+        }
+    }).detach();
 }
 
 bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
@@ -59,12 +42,10 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
         return false;
     }
     
-    // Skip essential actors
     if (a_actor->IsEssential()) {
         return false;
     }
     
-    // Skip summons and temporary actors
     auto* base = a_actor->GetActorBase();
     if (base && base->IsSummonable()) {
         return false;
@@ -73,125 +54,93 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
     return true;
 }
 
-void LootManager::GenerateLootTable(RE::Actor* a_actor) {
+void LootManager::MarkNonLootableItems(RE::Actor* a_actor) {
     if (!a_actor) return;
     
-    std::lock_guard<std::mutex> lock(lootTableMutex);
+    // Build list of equipped items to preserve visual appearance
+    std::set<RE::FormID> equippedItems;
     
-    // Clear any existing table for this actor
-    auto actorFormID = a_actor->GetFormID();
-    lootableTables[actorFormID].clear();
+    // Check worn armor
+    auto* wornArmor = a_actor->GetWornArmor(RE::BIPED_MODEL::BipedObjectSlot::kBody);
+    if (wornArmor) equippedItems.insert(wornArmor->GetFormID());
     
+    wornArmor = a_actor->GetWornArmor(RE::BIPED_MODEL::BipedObjectSlot::kHead);
+    if (wornArmor) equippedItems.insert(wornArmor->GetFormID());
+    
+    wornArmor = a_actor->GetWornArmor(RE::BIPED_MODEL::BipedObjectSlot::kHands);
+    if (wornArmor) equippedItems.insert(wornArmor->GetFormID());
+    
+    wornArmor = a_actor->GetWornArmor(RE::BIPED_MODEL::BipedObjectSlot::kFeet);
+    if (wornArmor) equippedItems.insert(wornArmor->GetFormID());
+    
+    // Check equipped weapons
+    auto* equippedRight = a_actor->GetEquippedObject(false);
+    if (equippedRight) equippedItems.insert(equippedRight->GetFormID());
+    
+    auto* equippedLeft = a_actor->GetEquippedObject(true);
+    if (equippedLeft) equippedItems.insert(equippedLeft->GetFormID());
+    
+    // Process inventory
     auto inventory = a_actor->GetInventory();
+    std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToRemove;
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
         if (!item || count <= 0) continue;
         
-        // Always make gold and quest items lootable
-        if (item->IsGold()) {
-            lootableTables[actorFormID].insert(item->GetFormID());
-            continue;
-        }
+        // Always keep gold
+        if (item->IsGold()) continue;
         
-        // Check for quest items (keys, etc.)
+        // Always keep keys
         if (item->GetFormType() == RE::FormType::Misc) {
             if (auto* miscItem = item->As<RE::TESObjectMISC>()) {
-                if (miscItem && miscItem->GetFullName() && 
+                if (miscItem->GetFullName() && 
                     std::string_view(miscItem->GetFullName()).find("Key") != std::string_view::npos) {
-                    lootableTables[actorFormID].insert(item->GetFormID());
                     continue;
                 }
             }
         }
         
-        // Check drop chance for this item
-        if (ShouldDropItem(item, a_actor)) {
-            lootableTables[actorFormID].insert(item->GetFormID());
+        // Keep equipped items for visual appearance
+        if (equippedItems.find(item->GetFormID()) != equippedItems.end()) {
+            continue;
         }
-    }
-}
-
-void LootManager::FilterContainerMenu() {
-    auto* ui = RE::UI::GetSingleton();
-    if (!ui) return;
-    
-    auto containerMenu = ui->GetMenu<RE::ContainerMenu>();
-    if (!containerMenu) return;
-    
-    // Get the container reference from menu
-    auto refHandle = containerMenu->GetTargetRefHandle();
-    auto refPtr = refHandle.get();
-    if (!refPtr) return;
-    
-    auto* actor = refPtr->As<RE::Actor>();
-    if (!actor || !actor->IsDead()) return;
-    
-    // Check if we have a loot table for this actor
-    std::lock_guard<std::mutex> lock(lootTableMutex);
-    auto it = lootableTables.find(actor->GetFormID());
-    if (it == lootableTables.end()) return;
-    
-    const auto& lootableItems = it->second;
-    
-    // Get container inventory data from menu
-    auto* inventoryData = containerMenu->itemList;
-    if (!inventoryData) return;
-    
-    // Filter items - hide non-lootable items
-    std::vector<RE::ItemList::Item*> itemsToHide;
-    
-    for (auto* item : inventoryData->items) {
-        if (!item || !item->data.objDesc) continue;
         
-        auto* boundObject = item->data.objDesc->object;
-        if (!boundObject) continue;
+        // Determine removal count for non-equipped items
+        std::int32_t removeCount = 0;
         
-        // If item is not in lootable table, mark for hiding
-        if (lootableItems.find(boundObject->GetFormID()) == lootableItems.end()) {
-            // Check stacked items - only hide the entire stack if none should drop
-            bool anyLootable = false;
-            if (item->data.objDesc->countDelta > 1) {
-                // For stacks, check each item individually
-                std::random_device rd;
-                std::mt19937 gen(rd());
-                
-                for (std::int32_t i = 0; i < item->data.objDesc->countDelta; ++i) {
-                    if (ShouldDropItem(boundObject, actor)) {
-                        anyLootable = true;
-                        break;
-                    }
+        if (count > 1) {
+            std::random_device rd;
+            std::mt19937 gen(rd());
+            
+            for (std::int32_t i = 0; i < count; ++i) {
+                if (!ShouldDropItem(item, a_actor)) {
+                    removeCount++;
                 }
             }
-            
-            if (!anyLootable) {
-                itemsToHide.push_back(item);
-            }
+        } else if (!ShouldDropItem(item, a_actor)) {
+            removeCount = 1;
+        }
+        
+        if (removeCount > 0) {
+            itemsToRemove.push_back({item, removeCount});
         }
     }
     
-    // Remove hidden items from display list
-    for (auto* item : itemsToHide) {
-        // Set count to 0 to hide from menu without removing from inventory
-        if (item && item->data.objDesc) {
-            item->data.objDesc->countDelta = 0;
-        }
+    // Remove non-lootable unequipped items
+    for (const auto& [item, count] : itemsToRemove) {
+        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
     }
-    
-    // Refresh menu display
-    containerMenu->InvalidateDataSource();
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
     if (!a_item) return true;
     
-    // Always drop gold
     if (a_item->IsGold()) {
         return true;
     }
     
-    // Check drop chance
     float dropChance = GetDropChance(a_item, a_actor);
     
     std::random_device rd;
@@ -204,7 +153,6 @@ bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor)
 float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
     auto* settings = Settings::GetSingleton();
     
-    // Get base drop chance by item type
     float baseChance = settings->defaultDropChance;
     
     switch (a_item->GetFormType()) {
@@ -242,30 +190,24 @@ float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor)
         break;
     }
     
-    // Apply quality modifiers
     float multiplier = 1.0f;
     
-    // Check if enchanted
     if (auto* enchantable = a_item->As<RE::TESEnchantableForm>()) {
         if (enchantable->formEnchanting) {
             multiplier *= settings->enchantedMultiplier;
         }
     }
     
-    // Check if unique/legendary (high value)
     if (a_item->GetGoldValue() > 1000) {
         multiplier *= settings->uniqueMultiplier;
     }
     
-    // Apply NPC type modifiers
     if (a_actor) {
         auto* base = a_actor->GetActorBase();
         if (base) {
-            // Boss check (high level)
             if (a_actor->GetLevel() > 30) {
                 multiplier *= settings->bossMultiplier;
             }
-            // Bandit check
             else if (base->GetRace() && base->GetRace()->formEditorID.contains("Bandit")) {
                 multiplier *= settings->banditMultiplier;
             }
