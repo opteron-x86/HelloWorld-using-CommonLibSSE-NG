@@ -1,5 +1,6 @@
 #include "LootManager.h"
 #include "Settings.h"
+#include "Papyrus.h"
 
 namespace {
     void MessageHandler(SKSE::MessagingInterface::Message* a_msg) {
@@ -16,6 +17,7 @@ namespace {
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse) {
     SKSE::Init(a_skse);
     
+    Papyrus::Register();
     SKSE::GetMessagingInterface()->RegisterListener(MessageHandler);
     
     return true;
