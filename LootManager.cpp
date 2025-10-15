@@ -83,7 +83,6 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor) {
         auto* actorPtr = actor.get();
         if (actorPtr) {
             DetermineAllowedLoot(actorPtr);
-            actorPtr->GetFormID();
         }
     }).detach();
 }
@@ -173,14 +172,11 @@ void LootManager::CreateLootContainer(RE::Actor* a_corpse, RE::Actor* a_activato
     
     // Check if container already exists
     if (lootData.hasContainer) {
-        auto containerRef = lootData.containerHandle.get();
-        if (containerRef) {
-            auto* container = containerRef.get();
-            if (container) {
-                container->Activate(a_activator, nullptr, 1, nullptr, 0);
-                activeCorpseID = corpseID;
-                return;
-            }
+        auto containerPtr = lootData.containerHandle.get();
+        if (containerPtr) {
+            containerPtr->Activate(a_activator, nullptr, 1, nullptr, 0);
+            activeCorpseID = corpseID;
+            return;
         }
     }
     
@@ -227,14 +223,8 @@ void LootManager::CleanupContainer(RE::FormID a_corpseID) {
     
     if (!lootData.hasContainer) return;
     
-    auto containerRef = lootData.containerHandle.get();
-    if (!containerRef) {
-        lootDataMap.erase(it);
-        return;
-    }
-    
-    auto* container = containerRef.get();
-    if (!container) {
+    auto containerPtr = lootData.containerHandle.get();
+    if (!containerPtr) {
         lootDataMap.erase(it);
         return;
     }
@@ -242,19 +232,19 @@ void LootManager::CleanupContainer(RE::FormID a_corpseID) {
     // Return any remaining items to corpse
     auto* corpse = RE::TESForm::LookupByID<RE::Actor>(a_corpseID);
     if (corpse) {
-        auto containerInv = container->GetInventory();
+        auto containerInv = containerPtr->GetInventory();
         for (const auto& [item, data] : containerInv) {
             auto& [count, entry] = data;
             if (item && count > 0) {
-                container->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kStoreInContainer, 
+                containerPtr->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kStoreInContainer, 
                     nullptr, corpse);
             }
         }
     }
     
     // Delete container
-    container->Disable();
-    container->SetDelete(true);
+    containerPtr->Disable();
+    containerPtr->SetDelete(true);
     
     // Clean up loot data
     lootDataMap.erase(it);
