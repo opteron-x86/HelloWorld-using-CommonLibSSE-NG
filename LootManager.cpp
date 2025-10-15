@@ -30,11 +30,15 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
 void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* /*a_killer*/) {
     auto actorHandle = a_actor->GetHandle();
     
-    std::thread([this, actorHandle]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto* taskInterface = SKSE::GetTaskInterface();
+    if (!taskInterface) return;
+    
+    taskInterface->AddTask([this, actorHandle]() {
+        auto actorPtr = actorHandle.get();
+        if (!actorPtr) return;
         
-        auto* actor = actorHandle.get().get();
-        if (!actor) return;
+        auto* actor = actorPtr.get();
+        if (!actor || !actor->IsDead()) return;
         
         std::lock_guard<std::mutex> lock(processingMutex);
         
@@ -42,8 +46,7 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* /*a_killer*/)
         DropLootPhysically(actor, droppedItems);
         CleanInventory(actor, droppedItems);
         actor->SetActivationBlocked(true);
-        
-    }).detach();
+    });
 }
 
 bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
@@ -99,7 +102,7 @@ std::vector<LootManager::DroppedItem> LootManager::RollForLoot(RE::Actor* a_acto
 }
 
 void LootManager::DropLootPhysically(RE::Actor* a_actor, const std::vector<DroppedItem>& items) {
-    if (items.empty()) return;
+    if (items.empty() || !a_actor) return;
     
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -107,8 +110,12 @@ void LootManager::DropLootPhysically(RE::Actor* a_actor, const std::vector<Dropp
     std::uniform_real_distribution<float> radiusDist(50.0f, 120.0f);
     
     auto corpsePos = a_actor->GetPosition();
+    auto* cell = a_actor->GetParentCell();
+    if (!cell) return;
     
     for (const auto& [item, count] : items) {
+        if (!item) continue;
+        
         float angle = angleDist(gen) * (3.14159f / 180.0f);
         float radius = radiusDist(gen);
         
@@ -116,14 +123,19 @@ void LootManager::DropLootPhysically(RE::Actor* a_actor, const std::vector<Dropp
         float offsetY = radius * std::sin(angle);
         
         auto droppedHandle = a_actor->DropObject(item, nullptr, count);
-        if (auto dropped = droppedHandle.get(); dropped) {
-            RE::NiPoint3 dropPos;
-            dropPos.x = corpsePos.x + offsetX;
-            dropPos.y = corpsePos.y + offsetY;
-            dropPos.z = corpsePos.z + 50.0f;
-            
-            dropped->SetPosition(dropPos);
-        }
+        auto droppedPtr = droppedHandle.get();
+        if (!droppedPtr) continue;
+        
+        auto* dropped = droppedPtr.get();
+        if (!dropped) continue;
+        
+        RE::NiPoint3 dropPos{
+            corpsePos.x + offsetX,
+            corpsePos.y + offsetY,
+            corpsePos.z + 50.0f
+        };
+        
+        dropped->SetPosition(dropPos);
     }
 }
 
