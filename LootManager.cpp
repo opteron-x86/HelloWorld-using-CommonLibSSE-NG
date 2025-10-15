@@ -6,6 +6,9 @@ void LootManager::Register() {
     auto* eventSource = RE::ScriptEventSourceHolder::GetSingleton();
     if (eventSource) {
         eventSource->AddEventSink<RE::TESDeathEvent>(this);
+        logger::info("Registered for death events");
+    } else {
+        logger::error("Failed to get event source holder");
     }
 }
 
@@ -18,10 +21,19 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     }
     
     auto* actor = a_event->actorDying->As<RE::Actor>();
+    if (!actor) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    
+    logger::info("Death event for: {}", actor->GetName());
+    
     auto* killer = a_event->actorKiller ? a_event->actorKiller->As<RE::Actor>() : nullptr;
     
-    if (actor && ShouldProcessActor(actor)) {
+    if (ShouldProcessActor(actor)) {
+        logger::info("Processing actor: {}", actor->GetName());
         ProcessActorDeath(actor, killer);
+    } else {
+        logger::info("Skipping actor: {}", actor->GetName());
     }
     
     return RE::BSEventNotifyControl::kContinue;
@@ -88,10 +100,17 @@ RE::TESObjectREFR* LootManager::CreateLootContainer(RE::Actor* a_actor) {
 }
 
 void LootManager::ProcessLoot(RE::Actor* a_actor) {
-    if (!a_actor) return;
+    if (!a_actor) {
+        logger::error("ProcessLoot: null actor");
+        return;
+    }
+    
+    logger::info("ProcessLoot: Starting for {}", a_actor->GetName());
     
     auto inventory = a_actor->GetInventory();
     std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToDrop;
+    
+    logger::info("ProcessLoot: Found {} inventory entries", inventory.size());
     
     // Evaluate all items
     for (const auto& [item, data] : inventory) {
@@ -101,20 +120,25 @@ void LootManager::ProcessLoot(RE::Actor* a_actor) {
             continue;
         }
         
+        logger::info("  Item: {} x{}", item->GetName(), count);
+        
         // Gold always transfers
         if (item->IsGold()) {
             itemsToDrop.push_back({item, count});
+            logger::info("    -> Gold, always drop");
             continue;
         }
         
         // Keys always transfer
         if (auto* key = item->As<RE::TESKey>()) {
             itemsToDrop.push_back({item, count});
+            logger::info("    -> Key, always drop");
             continue;
         }
         
         // Skip equipped items (stays on corpse for visuals)
         if (entry && entry->IsWorn()) {
+            logger::info("    -> Equipped, skipping");
             continue;
         }
         
@@ -128,22 +152,37 @@ void LootManager::ProcessLoot(RE::Actor* a_actor) {
         
         if (dropCount > 0) {
             itemsToDrop.push_back({item, dropCount});
+            logger::info("    -> Dropping {} of {}", dropCount, count);
+        } else {
+            logger::info("    -> Failed drop check");
         }
+    }
+    
+    logger::info("ProcessLoot: {} items to drop", itemsToDrop.size());
+    
+    if (itemsToDrop.empty()) {
+        logger::info("ProcessLoot: No items to drop, not creating container");
+        return;
     }
     
     // Create loot container
     auto* container = CreateLootContainer(a_actor);
     if (!container) {
+        logger::error("ProcessLoot: Failed to create container");
         return;
     }
+    
+    logger::info("ProcessLoot: Container created at {}", container->GetFormID());
     
     // Transfer items to container
     for (const auto& [item, count] : itemsToDrop) {
         a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, container);
+        logger::info("  Transferred: {} x{}", item->GetName(), count);
     }
     
     // Block corpse activation
     a_actor->SetActivationBlocked(true);
+    logger::info("ProcessLoot: Blocked corpse activation for {}", a_actor->GetName());
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
