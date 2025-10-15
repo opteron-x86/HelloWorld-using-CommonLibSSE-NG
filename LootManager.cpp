@@ -35,10 +35,21 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
         return RE::BSEventNotifyControl::kContinue;
     }
     
+    RE::ConsoleLog::GetSingleton()->Print("OpenClose event: ref=%X, opened=%d", 
+                                          a_event->ref->GetFormID(), a_event->opened);
+    
     auto* actor = a_event->ref->As<RE::Actor>();
-    if (!actor || !actor->IsDead()) {
+    if (!actor) {
+        RE::ConsoleLog::GetSingleton()->Print("  Not an actor");
         return RE::BSEventNotifyControl::kContinue;
     }
+    
+    if (!actor->IsDead()) {
+        RE::ConsoleLog::GetSingleton()->Print("  Actor not dead");
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    
+    RE::ConsoleLog::GetSingleton()->Print("  Dead actor corpse accessed");
     
     if (a_event->opened) {
         RemoveNonLootableItems(actor);
