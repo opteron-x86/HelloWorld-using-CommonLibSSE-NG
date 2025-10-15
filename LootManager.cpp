@@ -47,7 +47,17 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
         std::lock_guard<std::mutex> lock(dataMutex);
         auto it = lootDataMap.find(activated->GetFormID());
         if (it != lootDataMap.end()) {
-            HandleCorpseActivation(activated, activator);
+            auto corpseHandle = activated->GetHandle();
+            auto activatorHandle = activator->GetHandle();
+            
+            SKSE::GetTaskInterface()->AddTask([this, corpseHandle, activatorHandle]() {
+                auto corpse = corpseHandle.get();
+                auto activator = activatorHandle.get();
+                if (corpse && activator) {
+                    HandleCorpseActivation(corpse.get()->As<RE::Actor>(), activator.get()->As<RE::Actor>());
+                }
+            });
+            
             return RE::BSEventNotifyControl::kStop;
         }
     }
@@ -64,8 +74,12 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     }
     
     if (!a_event->opening && activeCorpseID != 0) {
-        CleanupContainer(activeCorpseID);
+        auto corpseID = activeCorpseID;
         activeCorpseID = 0;
+        
+        SKSE::GetTaskInterface()->AddTask([this, corpseID]() {
+            CleanupContainer(corpseID);
+        });
     }
     
     return RE::BSEventNotifyControl::kContinue;
