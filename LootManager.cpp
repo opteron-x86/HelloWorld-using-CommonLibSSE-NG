@@ -252,7 +252,6 @@ void LootManager::HandleCorpseActivation(RE::Actor* a_corpse, RE::TESObjectREFR*
 }
 
 RE::TESObjectREFR* LootManager::CreateTempContainer(RE::Actor* a_corpse) {
-    // Use a standard chest container
     auto* dataHandler = RE::TESDataHandler::GetSingleton();
     if (!dataHandler) {
         return nullptr;
@@ -264,7 +263,7 @@ RE::TESObjectREFR* LootManager::CreateTempContainer(RE::Actor* a_corpse) {
         return nullptr;
     }
     
-    // Place container near corpse
+    // Place container at corpse location
     auto containerPtr = a_corpse->PlaceObjectAtMe(chestForm, false);
     if (!containerPtr) {
         return nullptr;
@@ -272,14 +271,12 @@ RE::TESObjectREFR* LootManager::CreateTempContainer(RE::Actor* a_corpse) {
     
     auto* container = containerPtr.get();
     if (container) {
+        // Position at corpse
         container->SetPosition(a_corpse->GetPosition());
         container->data.angle = a_corpse->data.angle;
         
-        // Make it invisible
-        auto* node = container->Get3D();
-        if (node) {
-            node->SetVisible(false);
-        }
+        // Disable 3D model to make invisible
+        container->Set3D(nullptr, false);
     }
     
     return container;
