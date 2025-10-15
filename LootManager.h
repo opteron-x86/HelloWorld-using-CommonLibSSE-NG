@@ -1,9 +1,6 @@
 #pragma once
 
-class LootManager : 
-    public RE::BSTEventSink<RE::TESDeathEvent>,
-    public RE::BSTEventSink<RE::TESActivateEvent>,
-    public RE::BSTEventSink<RE::MenuOpenCloseEvent> {
+class LootManager : public RE::BSTEventSink<RE::TESDeathEvent> {
 public:
     static LootManager* GetSingleton() {
         static LootManager singleton;
@@ -15,22 +12,8 @@ public:
     RE::BSEventNotifyControl ProcessEvent(
         const RE::TESDeathEvent* a_event,
         RE::BSTEventSource<RE::TESDeathEvent>* a_eventSource) override;
-    
-    RE::BSEventNotifyControl ProcessEvent(
-        const RE::TESActivateEvent* a_event,
-        RE::BSTEventSource<RE::TESActivateEvent>* a_eventSource) override;
-    
-    RE::BSEventNotifyControl ProcessEvent(
-        const RE::MenuOpenCloseEvent* a_event,
-        RE::BSTEventSource<RE::MenuOpenCloseEvent>* a_eventSource) override;
 
 private:
-    struct LootData {
-        std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> allowedItems;
-        RE::ObjectRefHandle containerHandle;
-        bool hasContainer = false;
-    };
-    
     LootManager() = default;
     ~LootManager() = default;
     
@@ -39,18 +22,16 @@ private:
     LootManager& operator=(const LootManager&) = delete;
     LootManager& operator=(LootManager&&) = delete;
     
-    void ProcessActorDeath(RE::Actor* a_actor);
+    void ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer);
     bool ShouldProcessActor(RE::Actor* a_actor);
-    void DetermineAllowedLoot(RE::Actor* a_actor);
+    void FilterInventory(RE::Actor* a_actor);
     bool ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor);
     float GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor);
-    
-    void HandleCorpseActivation(RE::Actor* a_corpse, RE::Actor* a_activator);
-    void CreateLootContainer(RE::Actor* a_corpse, RE::Actor* a_activator);
-    void CleanupContainer(RE::FormID a_corpseID);
+    bool IsBodyArmor(RE::TESBoundObject* a_item);
+    void AddReplacementClothing(RE::Actor* a_actor);
     
     std::atomic<bool> enabled{true};
-    std::mutex dataMutex;
-    std::unordered_map<RE::FormID, LootData> lootDataMap;
-    RE::FormID activeCorpseID = 0;
+    std::mutex processingMutex;
+    
+    static constexpr std::uint32_t kBodySlotMask = 1 << 2; // Slot 32
 };
