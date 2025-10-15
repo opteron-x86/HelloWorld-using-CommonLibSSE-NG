@@ -7,37 +7,6 @@ void LootManager::Register() {
     if (eventSource) {
         eventSource->AddEventSink(this);
     }
-    RegisterConsoleCommands();
-}
-
-void LootManager::RegisterConsoleCommands() {
-    auto* console = RE::ConsoleLog::GetSingleton();
-    if (!console) return;
-    
-    // Register toggle command
-    class ToggleCommand : public RE::SCRIPT_FUNCTION {
-    public:
-        static void Execute(const RE::SCRIPT_PARAMETER*, RE::SCRIPT_FUNCTION::ScriptData*,
-                          RE::TESObjectREFR*, RE::TESObjectREFR*, RE::Script*,
-                          RE::ScriptLocals*, double&, std::uint32_t&) {
-            auto* manager = LootManager::GetSingleton();
-            manager->enabled = !manager->enabled;
-            RE::ConsoleLog::GetSingleton()->Print(
-                manager->enabled ? "Loot Drop System: Enabled" : "Loot Drop System: Disabled"
-            );
-        }
-    };
-    
-    // Register reload config command
-    class ReloadCommand : public RE::SCRIPT_FUNCTION {
-    public:
-        static void Execute(const RE::SCRIPT_PARAMETER*, RE::SCRIPT_FUNCTION::ScriptData*,
-                          RE::TESObjectREFR*, RE::TESObjectREFR*, RE::Script*,
-                          RE::ScriptLocals*, double&, std::uint32_t&) {
-            Settings::GetSingleton()->Load();
-            RE::ConsoleLog::GetSingleton()->Print("Loot Drop System: Config reloaded");
-        }
-    };
 }
 
 RE::BSEventNotifyControl LootManager::ProcessEvent(
@@ -66,7 +35,7 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         
         RE::NiPointer<RE::Actor> actor;
-        RE::LookupReferenceByHandle(actorHandle, actor);
+        actorHandle.get().get(actor);
         
         if (actor) {
             std::lock_guard<std::mutex> lock(processingMutex);
@@ -97,12 +66,11 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
 void LootManager::FilterInventory(RE::Actor* a_actor) {
     if (!a_actor) return;
     
-    auto* inventory = a_actor->GetInventory();
-    if (!inventory) return;
+    auto inventory = a_actor->GetInventory();
     
     std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToRemove;
     
-    for (const auto& [item, data] : *inventory) {
+    for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
         if (item && count > 0 && !ShouldDropItem(item, a_actor)) {
@@ -138,14 +106,23 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
     if (!a_item) return true;
     
-    // Always drop quest items
-    if (a_item->IsQuestItem()) {
-        return true;
-    }
-    
     // Always drop gold
     if (a_item->IsGold()) {
         return true;
+    }
+    
+    // Check if it's a quest item by checking if it has the quest item flag
+    // This requires checking the extra data in the inventory entry
+    // For now, we'll be conservative and always drop potential quest items
+    if (a_item->GetFormType() == RE::FormType::Misc) {
+        // Check for known quest item FormIDs or keywords
+        // For safety, always drop keys
+        if (auto* miscItem = a_item->As<RE::TESObjectMISC>()) {
+            if (miscItem && miscItem->GetFullName() && 
+                std::string_view(miscItem->GetFullName()).find("Key") != std::string_view::npos) {
+                return true;
+            }
+        }
     }
     
     // Check drop chance
@@ -177,7 +154,6 @@ float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor)
         baseChance = settings->ammoDropChance;
         break;
         
-    case RE::FormType::Potion:
     case RE::FormType::AlchemyItem:
         baseChance = settings->potionDropChance;
         break;
