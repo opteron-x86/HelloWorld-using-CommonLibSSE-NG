@@ -1,12 +1,18 @@
 #include "LootManager.h"
 #include "Settings.h"
+#include "ContainerMenuHook.h"
 #include <random>
+#include <chrono>
 
 void LootManager::Register() {
     auto* eventSource = RE::ScriptEventSourceHolder::GetSingleton();
     if (eventSource) {
-        eventSource->AddEventSink(this);
+        eventSource->AddEventSink<RE::TESDeathEvent>(this);
+        eventSource->AddEventSink<RE::TESContainerChangedEvent>(this);
     }
+    
+    // Install container menu hooks
+    ContainerMenuHook::Install();
 }
 
 RE::BSEventNotifyControl LootManager::ProcessEvent(
@@ -27,18 +33,49 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
+RE::BSEventNotifyControl LootManager::ProcessEvent(
+    const RE::TESContainerChangedEvent* a_event,
+    RE::BSTEventSource<RE::TESContainerChangedEvent>*) {
+    
+    if (!a_event || !a_event->newContainer || a_event->oldContainer != a_event->reference) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+    
+    // Player is looting
+    if (a_event->newContainer == 0x14) { // Player FormID
+        auto* container = RE::TESForm::LookupByID<RE::TESObjectREFR>(a_event->oldContainer);
+        auto* item = RE::TESForm::LookupByID<RE::TESBoundObject>(a_event->baseObj);
+        
+        if (container && item) {
+            std::lock_guard<std::mutex> lock(mapMutex);
+            
+            auto it = actorLootMap.find(container->GetFormID());
+            if (it != actorLootMap.end()) {
+                // Check if item is lootable
+                if (it->second.items.find(item->GetFormID()) == it->second.items.end()) {
+                    // Item not in lootable list - return it to container
+                    auto* player = RE::PlayerCharacter::GetSingleton();
+                    if (player) {
+                        player->RemoveItem(item, a_event->itemCount, 
+                            RE::ITEM_REMOVE_REASON::kRemove, nullptr, container);
+                    }
+                }
+            }
+        }
+    }
+    
+    return RE::BSEventNotifyControl::kContinue;
+}
+
 void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
-    // Process in separate thread with proper lifetime management
     auto actorHandle = a_actor->GetHandle();
     
     std::thread([this, actorHandle]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         
         auto* actor = actorHandle.get().get();
-        
         if (actor) {
-            std::lock_guard<std::mutex> lock(processingMutex);
-            FilterInventory(actor);
+            MarkUnlootableItems(actor);
         }
     }).detach();
 }
@@ -48,12 +85,10 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
         return false;
     }
     
-    // Skip essential actors
     if (a_actor->IsEssential()) {
         return false;
     }
     
-    // Skip summons and temporary actors
     auto* base = a_actor->GetActorBase();
     if (base && base->IsSummonable()) {
         return false;
@@ -62,44 +97,88 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
     return true;
 }
 
-void LootManager::FilterInventory(RE::Actor* a_actor) {
+void LootManager::MarkUnlootableItems(RE::Actor* a_actor) {
     if (!a_actor) return;
     
-    auto inventory = a_actor->GetInventory();
+    std::lock_guard<std::mutex> lock(mapMutex);
     
-    std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToRemove;
+    // Clean up old entries (older than 1 hour)
+    auto now = std::chrono::steady_clock::now();
+    for (auto it = actorLootMap.begin(); it != actorLootMap.end();) {
+        if (std::chrono::duration_cast<std::chrono::hours>(now - it->second.timestamp).count() > 1) {
+            it = actorLootMap.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    
+    // Build lootable items list
+    LootableItems lootableItems;
+    lootableItems.timestamp = now;
+    
+    auto inventory = a_actor->GetInventory();
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
-        if (item && count > 0 && !ShouldDropItem(item, a_actor)) {
-            // Calculate how many to remove
-            std::int32_t removeCount = 0;
-            
-            // For stackable items, randomly determine how many drop
-            if (count > 1) {
-                std::random_device rd;
-                std::mt19937 gen(rd());
-                
-                for (std::int32_t i = 0; i < count; ++i) {
-                    if (!ShouldDropItem(item, a_actor)) {
-                        removeCount++;
-                    }
-                }
-            } else {
-                removeCount = 1;
-            }
-            
-            if (removeCount > 0) {
-                itemsToRemove.push_back({item, removeCount});
+        if (item && count > 0) {
+            // Check each item individually for drop chance
+            if (ShouldDropItem(item, a_actor)) {
+                lootableItems.items.insert(item->GetFormID());
             }
         }
     }
     
-    // Remove filtered items
-    for (const auto& [item, count] : itemsToRemove) {
-        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+    // Add equipped items to lootable list based on drop chance
+    auto processEquipped = [&](RE::BIPED_MODEL::BipedObjectSlot slot) {
+        auto* equipped = a_actor->GetWornArmor(slot);
+        if (equipped && ShouldDropItem(equipped, a_actor)) {
+            lootableItems.items.insert(equipped->GetFormID());
+        }
+    };
+    
+    // Process all equipment slots
+    for (int i = 0; i < 32; ++i) {
+        processEquipped(static_cast<RE::BIPED_MODEL::BipedObjectSlot>(1 << i));
     }
+    
+    // Process weapons
+    if (auto* rightHand = a_actor->GetEquippedObject(false)) {
+        if (auto* weapon = rightHand->As<RE::TESObjectWEAP>()) {
+            if (ShouldDropItem(weapon, a_actor)) {
+                lootableItems.items.insert(weapon->GetFormID());
+            }
+        }
+    }
+    
+    if (auto* leftHand = a_actor->GetEquippedObject(true)) {
+        if (auto* weapon = leftHand->As<RE::TESObjectWEAP>()) {
+            if (ShouldDropItem(weapon, a_actor)) {
+                lootableItems.items.insert(weapon->GetFormID());
+            }
+        }
+    }
+    
+    actorLootMap[a_actor->GetFormID()] = std::move(lootableItems);
+}
+
+bool LootManager::IsItemLootable(RE::FormID a_containerID, RE::TESBoundObject* a_item) {
+    if (!a_item) return true;
+    
+    // Always allow gold and quest items
+    if (a_item->IsGold()) {
+        return true;
+    }
+    
+    std::lock_guard<std::mutex> lock(mapMutex);
+    
+    auto it = actorLootMap.find(a_containerID);
+    if (it != actorLootMap.end()) {
+        return it->second.items.find(a_item->GetFormID()) != it->second.items.end();
+    }
+    
+    // If not in our map, allow looting (for compatibility)
+    return true;
 }
 
 bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
@@ -110,21 +189,18 @@ bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor)
         return true;
     }
     
-    // Check if it's a quest item by checking if it has the quest item flag
-    // This requires checking the extra data in the inventory entry
-    // For now, we'll be conservative and always drop potential quest items
+    // Always drop keys and quest items
     if (a_item->GetFormType() == RE::FormType::Misc) {
-        // Check for known quest item FormIDs or keywords
-        // For safety, always drop keys
         if (auto* miscItem = a_item->As<RE::TESObjectMISC>()) {
-            if (miscItem && miscItem->GetFullName() && 
-                std::string_view(miscItem->GetFullName()).find("Key") != std::string_view::npos) {
-                return true;
+            if (miscItem && miscItem->GetFullName()) {
+                std::string_view name(miscItem->GetFullName());
+                if (name.find("Key") != std::string_view::npos) {
+                    return true;
+                }
             }
         }
     }
     
-    // Check drop chance
     float dropChance = GetDropChance(a_item, a_actor);
     
     std::random_device rd;
@@ -137,45 +213,36 @@ bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor)
 float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor) {
     auto* settings = Settings::GetSingleton();
     
-    // Get base drop chance by item type
     float baseChance = settings->defaultDropChance;
     
     switch (a_item->GetFormType()) {
     case RE::FormType::Armor:
         baseChance = settings->armorDropChance;
         break;
-        
     case RE::FormType::Weapon:
         baseChance = settings->weaponDropChance;
         break;
-        
     case RE::FormType::Ammo:
         baseChance = settings->ammoDropChance;
         break;
-        
     case RE::FormType::AlchemyItem:
         baseChance = settings->potionDropChance;
         break;
-        
     case RE::FormType::Ingredient:
         baseChance = settings->ingredientDropChance;
         break;
-        
     case RE::FormType::Book:
     case RE::FormType::Scroll:
         baseChance = settings->bookDropChance;
         break;
-        
     case RE::FormType::Misc:
         baseChance = settings->miscDropChance;
         break;
-        
     case RE::FormType::SoulGem:
         baseChance = settings->soulgemDropChance;
         break;
     }
     
-    // Apply quality modifiers
     float multiplier = 1.0f;
     
     // Check if enchanted
@@ -185,7 +252,7 @@ float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor)
         }
     }
     
-    // Check if unique/legendary (has a specific keyword or high value)
+    // Check if unique/legendary
     if (a_item->GetGoldValue() > 1000) {
         multiplier *= settings->uniqueMultiplier;
     }
@@ -194,11 +261,9 @@ float LootManager::GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor)
     if (a_actor) {
         auto* base = a_actor->GetActorBase();
         if (base) {
-            // Boss check (level > 30 or has boss keyword)
             if (a_actor->GetLevel() > 30) {
                 multiplier *= settings->bossMultiplier;
             }
-            // Bandit check
             else if (base->GetRace() && base->GetRace()->formEditorID.contains("Bandit")) {
                 multiplier *= settings->banditMultiplier;
             }
