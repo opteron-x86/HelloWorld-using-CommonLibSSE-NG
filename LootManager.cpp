@@ -5,8 +5,7 @@
 void LootManager::Register() {
     auto* eventSource = RE::ScriptEventSourceHolder::GetSingleton();
     if (eventSource) {
-        eventSource->AddEventSink<RE::TESDeathEvent>(this);
-        eventSource->AddEventSink<RE::TESContainerChangedEvent>(this);
+        eventSource->AddEventSink(this);
     }
 }
 
@@ -28,43 +27,21 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
-RE::BSEventNotifyControl LootManager::ProcessEvent(
-    const RE::TESContainerChangedEvent* a_event,
-    RE::BSTEventSource<RE::TESContainerChangedEvent>*) {
-    
-    if (!enabled || !a_event) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    // Check if player is taking items from a dead actor
-    if (a_event->newContainer == 0x14) {  // Player FormID
-        auto* source = RE::TESForm::LookupByID<RE::Actor>(a_event->oldContainer);
-        if (source && source->IsDead()) {
-            std::lock_guard<std::mutex> lock(processingMutex);
-            
-            auto it = lootableItems.find(source->GetFormID());
-            if (it != lootableItems.end()) {
-                // Check if this item is marked as lootable
-                if (it->second.find(a_event->baseObj) == it->second.end()) {
-                    // Item not lootable, return it to corpse
-                    auto* item = RE::TESForm::LookupByID<RE::TESBoundObject>(a_event->baseObj);
-                    auto* player = RE::PlayerCharacter::GetSingleton();
-                    if (item && player) {
-                        // Return item to corpse immediately
-                        player->RemoveItem(item, a_event->itemCount, 
-                            RE::ITEM_REMOVE_REASON::kRemove, nullptr, source);
-                    }
-                }
-            }
-        }
-    }
-    
-    return RE::BSEventNotifyControl::kContinue;
-}
-
 void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
-    // Mark lootable items immediately
-    MarkLootableItems(a_actor);
+    // Process in separate thread with proper lifetime management
+    auto actorHandle = a_actor->GetHandle();
+    
+    std::thread([this, actorHandle]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        RE::NiPointer<RE::Actor> actor;
+        RE::LookupReferenceByHandle(actorHandle.get(), actor);
+        
+        if (actor) {
+            std::lock_guard<std::mutex> lock(processingMutex);
+            FilterInventory(actor.get());
+        }
+    }).detach();
 }
 
 bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
@@ -86,39 +63,43 @@ bool LootManager::ShouldProcessActor(RE::Actor* a_actor) {
     return true;
 }
 
-void LootManager::MarkLootableItems(RE::Actor* a_actor) {
+void LootManager::FilterInventory(RE::Actor* a_actor) {
     if (!a_actor) return;
     
     auto inventory = a_actor->GetInventory();
-    std::unordered_set<RE::FormID> lootable;
+    
+    std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> itemsToRemove;
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
         
-        if (item && count > 0) {
-            // Determine if each item should be lootable
-            if (ShouldDropItem(item, a_actor)) {
-                lootable.insert(item->GetFormID());
+        if (item && count > 0 && !ShouldDropItem(item, a_actor)) {
+            // Calculate how many to remove
+            std::int32_t removeCount = 0;
+            
+            // For stackable items, randomly determine how many drop
+            if (count > 1) {
+                std::random_device rd;
+                std::mt19937 gen(rd());
+                
+                for (std::int32_t i = 0; i < count; ++i) {
+                    if (!ShouldDropItem(item, a_actor)) {
+                        removeCount++;
+                    }
+                }
+            } else {
+                removeCount = 1;
+            }
+            
+            if (removeCount > 0) {
+                itemsToRemove.push_back({item, removeCount});
             }
         }
     }
     
-    // Store lootable items for this actor
-    std::lock_guard<std::mutex> lock(processingMutex);
-    lootableItems[a_actor->GetFormID()] = lootable;
-    
-    // Clean up old entries if map gets too large
-    if (lootableItems.size() > 100) {
-        // Remove entries for actors that no longer exist
-        std::vector<RE::FormID> toRemove;
-        for (const auto& [formID, items] : lootableItems) {
-            if (!RE::TESForm::LookupByID<RE::Actor>(formID)) {
-                toRemove.push_back(formID);
-            }
-        }
-        for (auto formID : toRemove) {
-            lootableItems.erase(formID);
-        }
+    // Remove filtered items
+    for (const auto& [item, count] : itemsToRemove) {
+        a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
     }
 }
 
