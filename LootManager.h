@@ -1,12 +1,7 @@
 #pragma once
 
-struct LootData {
-    std::unordered_set<RE::FormID> lootableItems;  // FormIDs of items that can be looted
-    std::unordered_map<RE::FormID, std::int32_t> lootableCounts;  // How many of each
-};
-
 class LootManager : public RE::BSTEventSink<RE::TESDeathEvent>,
-                    public RE::BSTEventSink<RE::TESContainerChangedEvent> {
+                   public RE::BSTEventSink<RE::TESActivateEvent> {
 public:
     static LootManager* GetSingleton() {
         static LootManager singleton;
@@ -17,11 +12,11 @@ public:
     
     RE::BSEventNotifyControl ProcessEvent(
         const RE::TESDeathEvent* a_event,
-        RE::BSTEventSource<RE::TESDeathEvent>* a_eventSource) override;
-    
+        RE::BSTEventSource<RE::TESDeathEvent>*) override;
+        
     RE::BSEventNotifyControl ProcessEvent(
-        const RE::TESContainerChangedEvent* a_event,
-        RE::BSTEventSource<RE::TESContainerChangedEvent>* a_eventSource) override;
+        const RE::TESActivateEvent* a_event,
+        RE::BSTEventSource<RE::TESActivateEvent>*) override;
 
 private:
     LootManager() = default;
@@ -32,15 +27,25 @@ private:
     LootManager& operator=(const LootManager&) = delete;
     LootManager& operator=(LootManager&&) = delete;
     
-    void ProcessActorDeath(RE::Actor* a_actor);
+    struct RolledLoot {
+        std::vector<std::pair<RE::TESBoundObject*, std::int32_t>> items;
+        bool processed = false;
+        bool looted = false;
+    };
+    
+    std::unordered_map<RE::FormID, RolledLoot> rolledLootMap;
+    std::mutex mapMutex;
+    
+    void ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer);
     bool ShouldProcessActor(RE::Actor* a_actor);
-    LootData DetermineLootableItems(RE::Actor* a_actor);
+    void RollLootForActor(RE::Actor* a_actor);
     bool ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor);
     float GetDropChance(RE::TESBoundObject* a_item, RE::Actor* a_actor);
-    bool IsItemLootable(RE::FormID actorID, RE::FormID itemID, std::int32_t count);
-    void DecrementLootableCount(RE::FormID actorID, RE::FormID itemID, std::int32_t count);
     
-    std::unordered_map<RE::FormID, LootData> lootDataMap;
+    void HandleCorpseActivation(RE::Actor* a_corpse, RE::TESObjectREFR* a_activator);
+    RE::TESObjectREFR* CreateTempContainer(RE::Actor* a_corpse);
+    void TransferLootToContainer(RE::Actor* a_corpse, RE::TESObjectREFR* a_container, const RolledLoot& a_loot);
+    void CleanupContainer(RE::TESObjectREFR* a_container);
+    
     std::atomic<bool> enabled{true};
-    std::mutex mapMutex;
 };

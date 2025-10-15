@@ -7,7 +7,7 @@ namespace {
         case SKSE::MessagingInterface::kDataLoaded:
             LootManager::GetSingleton()->Register();
             Settings::GetSingleton()->Load();
-            RE::ConsoleLog::GetSingleton()->Print("Loot Drop System initialized");
+            RE::ConsoleLog::GetSingleton()->Print("Loot Drop System initialized with container-based looting");
             break;
         }
     }
@@ -16,5 +16,6 @@ namespace {
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse) {
     SKSE::Init(a_skse);
     SKSE::GetMessagingInterface()->RegisterListener(MessageHandler);
+    
     return true;
 }
