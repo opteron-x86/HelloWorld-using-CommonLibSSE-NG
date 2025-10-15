@@ -18,16 +18,15 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     }
     
     auto* actor = a_event->actorDying->As<RE::Actor>();
-    auto* killer = a_event->actorKiller ? a_event->actorKiller->As<RE::Actor>() : nullptr;
     
     if (actor && ShouldProcessActor(actor)) {
-        ProcessActorDeath(actor, killer);
+        ProcessActorDeath(actor, nullptr);
     }
     
     return RE::BSEventNotifyControl::kContinue;
 }
 
-void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor* a_killer) {
+void LootManager::ProcessActorDeath(RE::Actor* a_actor, RE::Actor*) {
     auto actorHandle = a_actor->GetHandle();
     
     std::thread([this, actorHandle]() {
@@ -65,19 +64,30 @@ bool LootManager::IsBodyArmor(RE::TESBoundObject* a_item) {
     }
     
     auto* armor = a_item->As<RE::TESObjectARMO>();
-    return armor && (armor->GetSlotMask() & kBodySlotMask);
+    if (!armor) {
+        return false;
+    }
+    
+    using BipedSlot = RE::BGSBipedObjectForm::BipedObjectSlot;
+    auto slotMask = armor->GetSlotMask();
+    
+    return (std::to_underlying(slotMask) & std::to_underlying(BipedSlot::kBody)) != 0;
 }
 
 void LootManager::AddReplacementClothing(RE::Actor* a_actor) {
-    // Look up "Clothes" [ARMO:000A6D7D] or create a light FormID for rags
-    // For now, using a common clothing item
     auto* dataHandler = RE::TESDataHandler::GetSingleton();
     if (!dataHandler) return;
     
-    // "Belted Tunic" or similar basic clothing
+    // "Belted Tunic" FormID 0x000A6D7D
     auto* clothing = dataHandler->LookupForm<RE::TESObjectARMO>(0x000A6D7D, "Skyrim.esm");
     if (clothing) {
-        a_actor->AddItem(clothing, 1, true);
+        a_actor->AddObjectToContainer(clothing, nullptr, 1, nullptr);
+        
+        // Equip the clothing
+        auto* equipManager = RE::ActorEquipManager::GetSingleton();
+        if (equipManager) {
+            equipManager->EquipObject(a_actor, clothing);
+        }
     }
 }
 
@@ -94,12 +104,10 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
         
         if (!item || count <= 0) continue;
         
-        // Always drop gold
         if (item->IsGold()) {
             continue;
         }
         
-        // Check each item instance for drop eligibility
         std::int32_t removeCount = 0;
         
         for (std::int32_t i = 0; i < count; ++i) {
@@ -109,7 +117,6 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
         }
         
         if (removeCount > 0) {
-            // Track if we're removing body armor
             if (IsBodyArmor(item)) {
                 removedBodyArmor = true;
             }
@@ -118,12 +125,10 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
         }
     }
     
-    // Remove non-lootable items
     for (const auto& [item, count] : itemsToRemove) {
         a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
     }
     
-    // Add replacement clothing if body armor was removed
     if (removedBodyArmor) {
         AddReplacementClothing(a_actor);
     }
@@ -136,7 +141,6 @@ bool LootManager::ShouldDropItem(RE::TESBoundObject* a_item, RE::Actor* a_actor)
         return true;
     }
     
-    // Check for quest items via form flags
     if (a_item->GetFormFlags() & RE::TESForm::RecordFlags::kMustUpdate) {
         return true;
     }

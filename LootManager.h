@@ -32,6 +32,4 @@ private:
     
     std::atomic<bool> enabled{true};
     std::mutex processingMutex;
-    
-    static constexpr std::uint32_t kBodySlotMask = 1 << 2; // Slot 32
 };
