@@ -37,7 +37,6 @@ void LootManager::ProcessActorDeath(RE::Actor* a_actor) {
         if (actor) {
             std::lock_guard<std::mutex> lock(processingMutex);
             ProcessInventory(actor);
-            actor->BlockActivation(true);
         }
     }).detach();
 }
@@ -90,12 +89,15 @@ void LootManager::ProcessInventory(RE::Actor* a_actor) {
         bool shouldDrop = isGold || ShouldDropItem(item, a_actor);
         
         if (shouldDrop) {
+            // Drop items on ground near corpse
             for (std::int32_t i = 0; i < count; ++i) {
                 a_actor->DropObject(item, nullptr, 1);
             }
         } else if (!isEquipped) {
+            // Remove non-equipped items that didn't pass drop check
             a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
         }
+        // Equipped items that didn't pass drop check remain on corpse
     }
 }
 
