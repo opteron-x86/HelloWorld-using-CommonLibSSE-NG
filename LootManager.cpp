@@ -26,31 +26,6 @@ RE::BSEventNotifyControl LootManager::ProcessEvent(
     return RE::BSEventNotifyControl::kContinue;
 }
 
-RE::BSEventNotifyControl LootManager::ProcessEvent(
-    const RE::TESActivateEvent* a_event,
-    RE::BSTEventSource<RE::TESActivateEvent>*) {
-    
-    if (!a_event || !a_event->objectActivated) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    auto* player = RE::PlayerCharacter::GetSingleton();
-    if (!player || !a_event->actionRef || a_event->actionRef->GetFormID() != player->GetFormID()) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    auto* actor = a_event->objectActivated->As<RE::Actor>();
-    if (!actor || !actor->IsDead()) {
-        return RE::BSEventNotifyControl::kContinue;
-    }
-    
-    RE::ConsoleLog::GetSingleton()->Print("Player activated dead actor: %X", actor->GetFormID());
-    
-    FilterCorpseInventory(actor);
-    
-    return RE::BSEventNotifyControl::kContinue;
-}
-
 void LootManager::ProcessActorDeath(RE::Actor* a_actor) {
     auto actorHandle = a_actor->GetHandle();
     
@@ -134,36 +109,10 @@ void LootManager::DetermineLootableItems(RE::Actor* a_actor) {
     FilterCorpseInventory(a_actor, lootableItems);
 }
 
-void LootManager::FilterCorpseInventory(RE::Actor* a_actor) {
+void LootManager::FilterCorpseInventory(RE::Actor* a_actor, const std::unordered_set<RE::FormID>& lootableItems) {
     if (!a_actor) return;
     
-    std::lock_guard<std::mutex> lock(dataMutex);
-    
-    auto it = actorLootData.find(a_actor->GetFormID());
-    if (it == actorLootData.end()) {
-        RE::ConsoleLog::GetSingleton()->Print("  No loot data found for actor");
-        return;
-    }
-    
-    auto& lootData = it->second;
-    
-    if (lootData.processed) {
-        RE::ConsoleLog::GetSingleton()->Print("  Already processed");
-        return;
-    }
-    
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::minutes>(now - lootData.timestamp);
-    
-    if (elapsed.count() > 10) {
-        RE::ConsoleLog::GetSingleton()->Print("  Data expired");
-        actorLootData.erase(it);
-        return;
-    }
-    
     auto inventory = a_actor->GetInventory();
-    
-    RE::ConsoleLog::GetSingleton()->Print("  Filtering inventory...");
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
@@ -176,20 +125,18 @@ void LootManager::FilterCorpseInventory(RE::Actor* a_actor) {
             continue;
         }
         
-        if (lootData.lootableItems.contains(item->GetFormID())) {
+        if (lootableItems.contains(item->GetFormID())) {
             continue;
         }
         
         if (IsItemEquipped(a_actor, item)) {
-            RE::ConsoleLog::GetSingleton()->Print("    Keeping equipped: %s", item->GetName());
+            RE::ConsoleLog::GetSingleton()->Print("  Keeping equipped: %s", item->GetName());
             continue;
         }
         
-        RE::ConsoleLog::GetSingleton()->Print("    Removing: %s (x%d)", item->GetName(), count);
+        RE::ConsoleLog::GetSingleton()->Print("  Removing: %s (x%d)", item->GetName(), count);
         a_actor->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
     }
-    
-    lootData.processed = true;
 }
 
 bool LootManager::IsItemEquipped(RE::Actor* a_actor, RE::TESBoundObject* a_item) {
