@@ -1,12 +1,22 @@
-SKSEPluginLoad(const SKSE::LoadInterface *skse) {
-    SKSE::Init(skse);
+#include "LootManager.h"
+#include "Settings.h"
 
-    // This example prints "Hello, world!" to the Skyrim ~ console.
-    // To view it, open the ~ console from the Skyrim Main Menu.
-    SKSE::GetMessagingInterface()->RegisterListener([](SKSE::MessagingInterface::Message *message) {
-        if (message->type == SKSE::MessagingInterface::kDataLoaded)
-            RE::ConsoleLog::GetSingleton()->Print("Hello, world!");
-    });
+namespace {
+    void MessageHandler(SKSE::MessagingInterface::Message* a_msg) {
+        switch (a_msg->type) {
+        case SKSE::MessagingInterface::kDataLoaded:
+            LootManager::GetSingleton()->Register();
+            Settings::GetSingleton()->Load();
+            RE::ConsoleLog::GetSingleton()->Print("Loot Drop System initialized");
+            break;
+        }
+    }
+}
 
+SKSEPluginLoad(const SKSE::LoadInterface* a_skse) {
+    SKSE::Init(a_skse);
+    
+    SKSE::GetMessagingInterface()->RegisterListener(MessageHandler);
+    
     return true;
 }
