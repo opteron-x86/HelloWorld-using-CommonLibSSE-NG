@@ -187,7 +187,7 @@ void LootManager::CreateLootContainer(RE::Actor* a_corpse, RE::Actor* a_activato
         return;
     }
     
-    auto* container = a_corpse->PlaceObjectAtMe(containerBase, false);
+    auto container = a_corpse->PlaceObjectAtMe(containerBase, false);
     if (!container) {
         RE::ConsoleLog::GetSingleton()->Print("LootDropSystem: Failed to create container");
         return;
@@ -201,7 +201,7 @@ void LootManager::CreateLootContainer(RE::Actor* a_corpse, RE::Actor* a_activato
     for (const auto& [item, count] : lootData.allowedItems) {
         if (item && count > 0) {
             a_corpse->RemoveItem(item, count, RE::ITEM_REMOVE_REASON::kStoreInContainer, 
-                nullptr, container);
+                nullptr, container.get());
         }
     }
     
