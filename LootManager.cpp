@@ -66,7 +66,9 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
     if (!a_actor) return;
     
     auto inventory = a_actor->GetInventory();
-    auto actorRef = a_actor->GetActorBase();
+    auto* actorBase = a_actor->GetActorBase();
+    
+    if (!actorBase) return;
     
     for (const auto& [item, data] : inventory) {
         auto& [count, entry] = data;
@@ -75,39 +77,21 @@ void LootManager::FilterInventory(RE::Actor* a_actor) {
             continue;
         }
         
-        // Process each instance of this item type
-        if (entry && entry->extraLists) {
-            for (auto* extraList : *entry->extraLists) {
-                if (extraList && !ShouldDropItem(item, a_actor)) {
-                    // Mark as owned by the dead NPC - player can't loot it
-                    if (!extraList->HasType(RE::ExtraDataType::kOwnership)) {
-                        auto extraOwnership = RE::BSExtraData::Create<RE::ExtraOwnership>();
-                        if (extraOwnership) {
-                            extraOwnership->owner = actorRef;
-                            extraList->Add(extraOwnership);
-                        }
-                    }
-                }
-            }
+        if (!entry || !entry->extraLists) {
+            continue;
         }
-        // Handle items without extra lists
-        else if (!ShouldDropItem(item, a_actor)) {
-            auto changes = a_actor->GetInventoryChanges();
-            if (changes && changes->entryList) {
-                for (auto& invEntry : *changes->entryList) {
-                    if (invEntry && invEntry->object == item) {
-                        if (!invEntry->extraLists) {
-                            invEntry->extraLists = new std::remove_pointer_t<decltype(invEntry->extraLists)>();
-                        }
-                        
-                        auto extraList = new RE::ExtraDataList();
-                        auto extraOwnership = RE::BSExtraData::Create<RE::ExtraOwnership>();
-                        if (extraOwnership && extraList) {
-                            extraOwnership->owner = actorRef;
-                            extraList->Add(extraOwnership);
-                            invEntry->extraLists->push_back(extraList);
-                        }
-                    }
+        
+        // Iterate through each instance's extra data
+        for (auto* extraList : *entry->extraLists) {
+            if (!extraList) continue;
+            
+            if (!ShouldDropItem(item, a_actor)) {
+                // Add ownership if not already owned
+                auto* ownership = extraList->GetByType<RE::ExtraOwnership>();
+                if (!ownership) {
+                    ownership = new RE::ExtraOwnership();
+                    ownership->owner = actorBase;
+                    extraList->Add(ownership);
                 }
             }
         }
